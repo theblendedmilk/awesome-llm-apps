@@ -4,11 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Seasonly · Skin Miles</title>
-  <meta name="description" content="Seasonly Paris — skincare rituals, boutique, studio booking and the Skin Miles rewards game.">
+  <meta name="description" content="Seasonly Paris: skincare rituals, boutique, Face Glow Bar booking and the Skin Miles rewards game.">
   <meta name="theme-color" content="#FBFAF9">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600;700&family=Fredoka:wght@600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -19,11 +23,13 @@
     </header>
     <div class="device">
       <main id="app" class="app"></main>
-      <nav id="tabbar" class="tabbar glass" aria-label="Main"></nav>
+      <nav id="tabbar" class="tabbar glass" aria-label="Main" hidden></nav>
       <div id="sheet" class="sheet" aria-hidden="true"></div>
       <div id="toast" class="toast-wrap" aria-live="polite"></div>
     </div>
   </div>
+  <script src="engine.js"></script>
+  <script src="catalog.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

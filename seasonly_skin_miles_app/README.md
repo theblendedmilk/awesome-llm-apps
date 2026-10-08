@@ -1,70 +1,103 @@
 # Seasonly · Skin Miles
 
-A mobile web app recreating the **Seasonly Paris** app (Seasonly 26 "liquid glass" screens), with an added rewards game: **Skin Miles**. Users earn miles every day and trade them for **seasonal vouchers** on Seasonly products and studio treatments.
+The Seasonly Paris app, rebuilt from the Seasonly 26 "liquid glass" screens, with the **Skin Miles** rewards game, accounts confirmed by SMS or email code, a referral programme, and a backend with an admin panel for products, emails and push notifications.
 
-No build step and no dependencies: plain HTML, CSS and JavaScript. Progress is saved in `localStorage`.
+```
+public/   the app (HTML/CSS/JS, no build step) + service worker for push
+admin/    the admin panel, served at /admin
+server/   Node.js backend (Express + built-in SQLite)
+test/     API tests and a browser end-to-end test
+```
 
 ## Run it
 
+Requires **Node.js 22.13 or later** (it uses Node's built-in SQLite).
+
 ```bash
 cd seasonly_skin_miles_app
-python3 -m http.server 8000   # or just open index.html
+npm install
+npm run dev          # http://localhost:3000  ·  admin: http://localhost:3000/admin
 ```
 
-Open http://localhost:8000. On a desktop browser the app appears in a phone frame on the dark espresso backdrop used in the Seasonly 26 board. On a phone it fills the screen.
+`npm run dev` shows sign-up codes on screen, so no SMS or email account is needed to try it. The development admin login is `admin@seasonly.fr` / `seasonly-admin` (set `ADMIN_PASSWORD` to change it).
 
-## Design system
+Opening `public/index.html` directly, with no server, runs an **offline demo mode**: same screens and rules, but accounts stay on the device and codes are shown on screen.
 
-| Token | Value | Used for |
-|---|---|---|
-| Display font | **Cormorant Garamond** (400 / italic) | Headlines such as *"Your skin in balance, this season."*, product names, `seasonly` logo |
-| UI font | **Inter** (400–700) | Body text, labels, stats, buttons |
-| Celebration font | **Fredoka** | The puffy 3D streak counter |
-| Background | `#FBFAF9` (warm white, sampled from the live app) | App background |
-| Ink | `#0E0E10` | Text, pill buttons ("Start", "Add — bag"), active chips |
-| Terracotta accent | `#C4806C` | Eyebrows (BOUTIQUE, STEP 1 OF 4), links, progress rings |
-| Accent soft | `#F5E8E6` | Stat icon circles, miles chips |
-| Espresso | `#2A201B` | Desktop stage, Skin Miles wallet card |
-| Glass | `rgba(255,255,255,.68)` + `backdrop-filter: blur(22px) saturate(170%)` | Stats card, tab bar, miles card, buy bar |
+## Production
 
-All tokens are CSS variables at the top of `styles.css`.
+1. Copy `.env.example` to `.env` and fill it in: `ADMIN_PASSWORD`, `SMTP_URL` (email), `TWILIO_*` (SMS), `NODE_ENV=production`.
+2. Run with Docker (`docker build -t seasonly . && docker run -p 3000:3000 -v seasonly-data:/data --env-file .env seasonly`) or `npm start` on any Node host (Render, Railway, Fly.io, Scaleway, OVH…).
+3. Serve it over **HTTPS**. Push notifications and secure cookies require it.
+4. Back up `DATA_DIR`: it holds the database and the key that encrypts profile photos.
 
-## Screens
+In production, codes are never shown on screen. If no SMS or email provider is configured for the channel a customer picks, sign-up returns a clear error instead of silently failing.
 
-- **Home**: hero with the season and week chip, glass stats card (miles, day streak, radiance), daily check-in, daily wellness tip, today's ritual with a progress ring, *Curated for autumn* rituals, *From the laboratoire*.
-- **Shop (La maison)**: search, category chips, Seasonly Miles progress card, product grid, product page (TensioLift Lifting Serum and others) with a clinical stats row and an "Add — bag" bar.
-- **Book**: four steps (Studio → Soin → Date → Confirm) across the Marais, Saint-Germain, Lyon and Bordeaux studios. A service voucher can be applied at the Confirm step.
-- **Rewards**: the Skin Miles game hub (details below).
-- **Profile**: tier, upcoming visits, miles history, how the scoring works, and a demo reset.
+## What the app does
 
-## Skin Miles: how you earn
+**Accounts**
+- Sign-up with first name, last name, email, mobile number and an optional referral code, then a 6-digit code sent by **SMS, email or both**. Sign-in uses a code too, so there is no password to steal.
+- Codes expire after 10 minutes, are stored hashed, and lock after 5 wrong tries. Sending is rate-limited per IP and per phone or email.
+- **Log out** (Profile → Log out) revokes the session on the server. **Delete my account** erases the account, photo and history.
+
+**Profile photo, protected against theft**
+- The photo is resized and re-encoded **on the phone**, which drops EXIF data (GPS location, device) before upload.
+- The server accepts only real JPEG/PNG files (checked by their bytes), max 5 MB, and strips metadata again.
+- It is stored **encrypted (AES-256-GCM)** and served only to its owner (`private, no-store`), never on a public URL.
+- In the app it's drawn as a background under a transparent layer, with long-press, right-click and drag disabled.
+- One limit no web app can remove: someone can still screenshot their own screen.
+
+**Skin Miles** (computed on the server, so balances can't be edited in the browser)
 
 | Action | Miles |
 |---|---|
-| Daily check-in | +20, with streak bonuses at 7 (+100), 14, 30, 60, 100 and 365 days |
-| Read the daily wellness tip | +10 |
-| Complete a guided ritual (timer for each step) | +30 to +50 |
-| **Glow Match**: memory game, pair the 6 actives | 80 for a perfect game, −5 per extra move (minimum 20) |
-| **Skin Quiz**: 5 skincare questions | +10 per correct answer |
-| **Glow Wheel**: one spin a day | 5 to 100 |
-| Weekly and seasonal challenges (claimable) | +60 to +200 |
-| Shop order | 1 mile per €1 spent |
-| Studio visit | +150 |
+| Welcome gift on confirmation | +300 |
+| Daily check-in | +20, bonuses at 7, 14, 30, 60, 100 and 365 days |
+| Wellness tip | +10 |
+| Guided ritual | +30 to +50 |
+| Glow Match / Skin Quiz / Glow Wheel | up to 80 / 50 / 100 per day |
+| Weekly and seasonal challenges | +60 to +200 |
+| Order | 1 per €1 |
+| Face Glow Bar booking | +150 |
+| Friend referred and booked | +200 |
 
-Games pay out once a day. After that you can keep playing for practice. Hitting a streak milestone opens the full-screen **"jours de suite"** celebration, with a puffy 3D number, the week row with a gift, and the "Continuer" button.
+Tiers (Bourgeon, Éclat, Rayonnance, Lumière) multiply non-purchase rewards up to ×1.5. Miles buy **seasonal vouchers**: product vouchers apply in the bag and treatment vouchers at booking. Only the current season can be redeemed, and next season is shown as a preview.
 
-**Tiers** are based on lifetime miles and multiply every reward except purchases: Bourgeon (×1) → Éclat at 1,500 (×1.1) → Rayonnance at 4,000 (×1.25) → Lumière at 8,000 (×1.5).
+**Referral programme**
+- Every customer gets a code and a share link (`/#ref-CODE`).
+- The friend gets **10% off** their first Face Glow Bar treatment.
+- When the friend **confirms their account and books**, the referrer gets **+5% off their next booking, building up to 20%**, plus 200 miles, and is notified by push and email.
+- All three percentages can be changed in the admin panel.
 
-## Seasonal vouchers
+**Streak screen.** Uses the app's own look: cream background, Cormorant numeral inside a terracotta progress ring, glass week card, and a black "Continuer" button.
 
-The current season is worked out from the date (Winter: Dec–Feb, Spring: Mar–May, Summer: Jun–Aug, Autumn: Sep–Nov). Only the current season's vouchers can be redeemed, and next season's are shown locked as a teaser. A redeemed voucher gets a code such as `SEAS-AUX7K2` and stays valid until the end of the season.
+**Home portrait.** The home and welcome screens show an illustrated portrait. Upload the real campaign photo in **Admin → Settings → Home screen photo** to replace it.
 
-- **Produit** vouchers (for example €10 off any sérum, −20% on the autumn nourish kit) apply in the bag at checkout.
-- **Soin** vouchers (for example −30% on Kobido reveal, a free LED session) apply at the Confirm step when booking.
+## Catalogue
 
-To change rewards, edit the `VOUCHERS` array in `app.js`.
+The 16 products are real Seasonly products: TensioLift serum and refill, Sérum Anti-âge, Anti-imperfections, Regard Défatigant, Gelée Nettoyante, the two masks, Duo Inner Glow, Crème Fluide, Crème Riche and Crème Lumière, Huile de Nuit, and three gua shas. Their names, prices, sizes and descriptions come from seasonly.fr and the Seasonly page on sephora.fr as indexed in October 2026.
 
-## Customising
+The Face Glow Bar treatments (Gym, Glow, Winter, 15 min, €25) and the three Paris Face Glow Bars at Sephora (La Canopée, Saint-Lazare, Beaugrenelle) come from the same sources. The Soin Signature (30 min, €50) is not from those pages; check it before launch.
 
-- **Photos:** the hero, products and studios are drawn in SVG and CSS so the app works offline. To use a real hero photo, add it as `assets/hero.jpg`, set `--hero-photo: url('assets/hero.jpg')` in `:root`, and remove the `.hero-art` element.
-- **Catalog:** `PRODUCTS`, `SERVICES`, `STUDIOS`, `RITUALS`, `TIPS` and `QUIZ` at the top of `app.js`.
+**Product photos are not included.** seasonly.fr could not be reached from the build environment, and its photos belong to Seasonly. Upload them in **Admin → Products → Edit → Upload photo**. Until then, each product shows an illustrated bottle. Check the prices in the admin before launch.
+
+## Admin panel (`/admin`)
+
+| Section | What it does |
+|---|---|
+| Dashboard | Customers, bookings, orders, revenue, miles, referrals, push subscribers, and which delivery channels are connected |
+| Products | Add, edit, hide or delete products, with photo, price, "was" price, size, category, badge and results |
+| Customers | Search customers and adjust miles with a reason the customer sees |
+| Bookings, Orders, Referrals | Lists of what customers did |
+| Email | Send to all customers, to customers who referred a friend, or to one customer. `{first}` inserts the first name |
+| Push notifications | Send to everyone who turned on notifications, with a live preview |
+| Sent messages | Every email, SMS and push sent or logged |
+| Settings | Referral percentages and the home screen photo |
+
+## Tests
+
+```bash
+npm test                         # 13 API tests (auth, codes, rewards, referral, photo security, admin)
+npm i -D playwright && node test/e2e.js --runs 3   # full browser journey, 3 times in a row
+```
+
+The end-to-end run signs up by SMS code, checks in (streak screen), reads a tip, completes a ritual, plays the three games, buys a product, uploads a photo and logs out. A friend then signs up with the referral link and books with −10%. The referrer signs back in by email code and sees −5%. The admin creates a product with a photo, sends an email and a push notification, and the app shows the new product. Finally, the offline demo mode is checked.
