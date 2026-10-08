@@ -83,33 +83,6 @@
     return p.image ? `<img class="p-img${big ? ' big' : ''}" src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy" draggable="false">` : productArt(p, big);
   }
 
-  // Illustrated portrait used until a campaign photo is uploaded in the admin panel.
-  function faceArt() {
-    return `<svg class="face-art" viewBox="0 0 400 380" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">
-      <defs>
-        <linearGradient id="fbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F7EFE9"/><stop offset="1" stop-color="#EBD7CB"/></linearGradient>
-        <linearGradient id="fskin" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#EDCDB8"/><stop offset=".55" stop-color="#DFB295"/><stop offset="1" stop-color="#C9967A"/></linearGradient>
-        <radialGradient id="fblush" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#D98C77" stop-opacity=".45"/><stop offset="1" stop-color="#D98C77" stop-opacity="0"/></radialGradient>
-        <linearGradient id="fhair" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4A342A"/><stop offset="1" stop-color="#2A1D17"/></linearGradient>
-        <radialGradient id="fwood" cx=".35" cy=".3" r=".75"><stop offset="0" stop-color="#E4C6A5"/><stop offset="1" stop-color="#B98A63"/></radialGradient>
-      </defs>
-      <rect width="400" height="380" fill="url(#fbg)"/>
-      <path d="M196 30C230-20 380-30 410 40V380H330C340 300 330 250 318 200 300 120 250 70 196 30Z" fill="url(#fhair)"/>
-      <path d="M205 38C196 70 186 100 188 128 189 136 194 140 193 146 186 162 168 180 160 194 156 202 162 208 172 209L182 212C183 218 175 222 174 228 176 233 184 233 183 237 178 241 176 246 180 251 186 255 190 258 187 266 183 276 184 288 196 296 214 306 246 308 268 300 270 330 262 360 258 380H338C342 320 336 260 320 200 302 130 262 70 205 38Z" fill="url(#fskin)"/>
-      <ellipse cx="236" cy="205" rx="44" ry="34" fill="url(#fblush)"/>
-      <path d="M296 168C312 160 326 178 320 198 316 212 302 216 296 208" fill="#D4A385" stroke="#B9876B" stroke-width="1.2"/>
-      <path d="M202 128C214 120 232 118 246 124" fill="none" stroke="#4A342A" stroke-width="3.2" stroke-linecap="round"/>
-      <path d="M204 150C212 157 226 158 238 151" fill="none" stroke="#3A2A22" stroke-width="2" stroke-linecap="round"/>
-      <g stroke="#3A2A22" stroke-width="1.3" stroke-linecap="round"><path d="M208 154l-3 5"/><path d="M215 157l-2 6"/><path d="M223 158l-1 6"/><path d="M231 156l1 6"/></g>
-      <path d="M182 212C183 218 175 222 174 228 176 233 184 233 183 237 178 241 176 246 180 251 186 252 193 246 193 239 193 230 189 220 182 212Z" fill="#C27C6B"/>
-      <path d="M180 236C184 237 189 237 193 235" stroke="#9E5D50" stroke-width="1.2" fill="none" stroke-linecap="round"/>
-      <path d="M232 60C280 80 312 130 326 190" stroke="#6B4B3C" stroke-width="2" fill="none" opacity=".5"/>
-      <g transform="translate(230 250) rotate(28)">
-        <rect x="58" y="-6" width="120" height="12" rx="6" fill="#C9A27F"/><rect x="18" y="-3" width="44" height="6" rx="3" fill="#B98A63"/>
-        <circle cx="0" cy="-22" r="22" fill="url(#fwood)"/><circle cx="10" cy="24" r="17" fill="url(#fwood)"/><circle cx="-7" cy="-30" r="6" fill="#fff" opacity=".35"/>
-      </g></svg>`;
-  }
-
   /* ---------- Utils ---------- */
   const $ = (s, r = document) => r.querySelector(s);
   const nf = (n) => Math.round(n).toLocaleString('en-US');
@@ -376,7 +349,9 @@
   const field = (id, label, attrs = '', value = '') => `<label class="field" for="${id}"><span>${label}</span><input id="${id}" name="${id}" value="${esc(value)}" ${attrs}></label>`;
 
   /* ---------- Auth screens ---------- */
-  const heroBg = () => (CONFIG.hero ? `<div class="hero-photo" style="background-image:url('${esc(CONFIG.hero)}')"></div>` : `<div class="hero-art">${faceArt()}</div>`);
+  // Campaign photo: the one uploaded in the admin panel, else the bundled Seasonly photo.
+  const HERO_DEFAULT = 'img/hero.jpg';
+  const heroBg = () => `<div class="hero-photo" role="img" aria-label="Seasonly skincare ritual" style="background-image:url('${esc(CONFIG.hero || HERO_DEFAULT)}')"></div>`;
   const AUTH = {
     welcome() {
       return `<section class="welcome">

@@ -23,6 +23,10 @@ npm run dev          # http://localhost:3000  ·  admin: http://localhost:3000/a
 
 Opening `public/index.html` directly, with no server, runs an **offline demo mode**: same screens and rules, but accounts stay on the device and codes are shown on screen.
 
+## Hosted test version
+
+The app is published on Netlify from this folder (`netlify.toml`) at https://seasonly-app.netlify.app, in demo mode: each phone keeps its own accounts and the code is shown on screen.
+
 ## Production
 
 1. Copy `.env.example` to `.env` and fill it in: `ADMIN_PASSWORD`, `SMTP_URL` (email), `TWILIO_*` (SMS), `NODE_ENV=production`.
@@ -70,7 +74,7 @@ Tiers (Bourgeon, Éclat, Rayonnance, Lumière) multiply non-purchase rewards up 
 
 **Streak screen.** Uses the app's own look: cream background, Cormorant numeral inside a terracotta progress ring, glass week card, and a black "Continuer" button.
 
-**Home portrait.** The home and welcome screens show an illustrated portrait. Upload the real campaign photo in **Admin → Settings → Home screen photo** to replace it.
+**Home photo.** The home and welcome screens show the Seasonly campaign photo in `public/img/hero.jpg`. A photo uploaded in **Admin → Settings → Home screen photo** replaces it.
 
 ## Catalogue
 

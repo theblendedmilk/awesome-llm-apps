@@ -71,7 +71,7 @@ async function run(n, browser) {
     await p.fill('#code', await code(p));
     await p.waitForSelector('.stats');
     assert.equal(await miles(p), 300, 'welcome gift');
-    assert.ok(await p.isVisible('.hero .face-art'), 'portrait on home');
+    assert.match(await p.$eval('.hero .hero-photo', (el) => el.style.backgroundImage), /img\/hero\.jpg/, 'campaign photo on home');
     await shot(p, '04-home');
     step('sign-up with code ✓');
 
