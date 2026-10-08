@@ -644,7 +644,7 @@
   function celebrate(amt) {
     const msgs = { 1: 'A fresh start — your skin loves consistency.', 7: 'One full week of rituals. Your glow is showing!', 30: 'A whole month of care: you are a model of perseverance.', 365: 'Une année entière de bien-être : vous êtes un modèle de persévérance !' };
     const msg = msgs[S.streak] || (S.streak % 7 === 0 ? `${S.streak / 7} weeks in a row. Magnifique.` : 'Every day counts. Come back tomorrow to keep the flame.');
-    const conf = Array.from({ length: 28 }, (_, i) => `<i style="left:${(i * 37) % 100}%;animation-delay:${(i % 7) * 0.12}s;background:${['#C47E62', '#E9A27A', '#F2C6A8', '#141110', '#D9B48C'][i % 5]}"></i>`).join('');
+    const conf = Array.from({ length: 28 }, (_, i) => `<i style="left:${(i * 37) % 100}%;animation-delay:${(i % 7) * 0.12}s;background:${['#C4806C', '#E9A27A', '#F2C6A8', '#0E0E10', '#D9B48C'][i % 5]}"></i>`).join('');
     openSheet(`<div class="celebrate">
       <div class="confetti">${conf}</div>
       <div class="cel-mid">
@@ -943,18 +943,18 @@
   function wheelView() {
     const played = doneToday('wheel');
     const n = WHEEL.length, seg = 360 / n;
-    const colors = ['#F3E3DA', '#E9C8B3', '#F6EDE6', '#C47E62', '#EFD9CB', '#141110', '#F3E3DA', '#DDB096'];
+    const colors = ['#F3E3DA', '#E9C8B3', '#F6EDE6', '#C4806C', '#EFD9CB', '#0E0E10', '#F3E3DA', '#DDB096'];
     const slices = WHEEL.map((v, i) => {
       const a0 = (i * seg - 90) * Math.PI / 180, a1 = ((i + 1) * seg - 90) * Math.PI / 180;
       const x0 = 100 + 96 * Math.cos(a0), y0 = 100 + 96 * Math.sin(a0), x1 = 100 + 96 * Math.cos(a1), y1 = 100 + 96 * Math.sin(a1);
       const mid = (i + 0.5) * seg;
-      const dark = ['#C47E62', '#141110'].includes(colors[i]);
+      const dark = ['#C4806C', '#0E0E10'].includes(colors[i]);
       return `<path d="M100 100 L${x0} ${y0} A96 96 0 0 1 ${x1} ${y1}Z" fill="${colors[i]}" stroke="#fff" stroke-width="1.5"/>
-        <text x="100" y="30" transform="rotate(${mid} 100 100)" text-anchor="middle" font-family="Inter" font-weight="700" font-size="14" fill="${dark ? '#fff' : '#141110'}">${v}</text>`;
+        <text x="100" y="30" transform="rotate(${mid} 100 100)" text-anchor="middle" font-family="Inter" font-weight="700" font-size="14" fill="${dark ? '#fff' : '#0E0E10'}">${v}</text>`;
     }).join('');
     return `<div class="sheet-pad center">${gameHead('Glow Wheel', played ? `Today's spin is done${S.wheelWin ? ` — you won ${S.wheelWin} miles${tierOf(S.lifetime).mult > 1 ? ' incl. your tier bonus' : ''}` : ''}. A new spin unlocks tomorrow.` : 'One free spin every day. Every slice is a win.')}
       <div class="wheel-wrap"><span class="pointer"></span>
-        <svg id="wheel" class="wheel" viewBox="0 0 200 200" style="transform:rotate(${G.rot || 0}deg)">${slices}<circle cx="100" cy="100" r="16" fill="#fff"/><text x="100" y="104" text-anchor="middle" font-family="Cormorant Garamond" font-size="12" fill="#141110">s</text></svg></div>
+        <svg id="wheel" class="wheel" viewBox="0 0 200 200" style="transform:rotate(${G.rot || 0}deg)">${slices}<circle cx="100" cy="100" r="16" fill="#fff"/><text x="100" y="104" text-anchor="middle" font-family="Cormorant Garamond" font-size="12" fill="#0E0E10">s</text></svg></div>
       <button class="btn-dark wide" data-a="spin" ${played || G.spinning ? 'disabled' : ''}>${played ? 'Come back tomorrow' : G.spinning ? 'Spinning…' : 'Spin the wheel'}</button></div>`;
   }
   function spin() {
@@ -1026,7 +1026,7 @@
     add(arg) { addToBag(arg); },
     'add-close'(arg) { closeSheet(); addToBag(arg); },
     fav(arg) { S.favs = S.favs.includes(arg) ? S.favs.filter((f) => f !== arg) : [...S.favs, arg]; save(); refreshSheet(); },
-    share() { const d = { title: 'Seasonly Paris', text: 'TensioLift by Seasonly', url: location.href }; if (navigator.share) navigator.share(d).catch(() => {}); else toast('Link ready', 'Copy the page URL to share', 'bag'); },
+    share() { const d = { title: 'Seasonly Paris', text: 'TensioLift by Seasonly', url: location.href }; const fallback = () => toast('Sharing unavailable here', 'Copy the page link from your browser', 'bag'); if (navigator.share) navigator.share(d).catch(fallback); else fallback(); },
     qty(arg) {
       const [id, d] = arg.split(':'); const l = S.bag.find((x) => x.id === id); if (!l) return;
       l.qty += +d; if (l.qty <= 0) S.bag = S.bag.filter((x) => x.id !== id);
@@ -1080,8 +1080,20 @@
         <button class="btn-dark wide mt16" data-a="close">Done</button></div>`);
       ui.step = 1; ui.bk = { studio: null, service: null, day: 0, slot: null, voucher: null };
     },
-    rename() { const n = prompt('Your first name', S.name); if (n && n.trim()) { S.name = n.trim().slice(0, 20); save(); rerender(); } },
-    reset() { if (confirm('Reset all Skin Miles demo data?')) { S = seed(); save(); render(); toast('Demo reset', 'Fresh start'); } },
+    rename() {
+      openSheet(`<div class="sheet-pad"><p class="eyebrow accent">Profile</p><h2 class="serif-h sm">Your first name</h2>
+        <form id="renameForm" class="stack"><label class="search glass" for="nameInput">${ic('user', 16)}<input id="nameInput" maxlength="20" value="${esc(S.name)}" autocomplete="given-name"></label>
+        <button class="btn-dark wide" type="submit">Save</button></form>
+        <button class="btn-ghost wide mt8" data-a="close">Cancel</button></div>`);
+      setTimeout(() => { const i = $('#nameInput'); if (i) i.focus(); }, 350);
+    },
+    reset() {
+      openSheet(`<div class="sheet-pad center"><p class="eyebrow accent">Demo data</p><h2 class="serif-h sm">Start over?</h2>
+        <p class="muted">This clears your miles, streak, vouchers and history on this device, and reloads the sample account.</p>
+        <button class="btn-dark wide mt16" data-a="reset-ok">Reset demo data</button>
+        <button class="btn-ghost wide mt8" data-a="close">Keep my progress</button></div>`);
+    },
+    'reset-ok'() { S = seed(); save(); closeSheet(); A.tab('home'); toast('Demo reset', 'Fresh start with the sample account'); },
   };
 
   document.addEventListener('click', (e) => {
@@ -1097,6 +1109,13 @@
     if (ui.q && ui.cat !== 'All') ui.cat = 'All';
     rerender();
     const s = $('#search'); s.focus(); s.setSelectionRange(pos, pos);
+  });
+  document.addEventListener('submit', (e) => {
+    if (e.target.id !== 'renameForm') return;
+    e.preventDefault();
+    const n = $('#nameInput').value.trim();
+    if (n) { S.name = n.slice(0, 20); save(); }
+    closeSheet();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet.classList.contains('open')) closeSheet(); });
 

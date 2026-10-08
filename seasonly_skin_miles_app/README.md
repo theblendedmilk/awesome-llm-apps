@@ -20,10 +20,10 @@ Open http://localhost:8000. On a desktop browser the app appears in a phone fram
 | Display font | **Cormorant Garamond** (400 / italic) | Headlines such as *"Your skin in balance, this season."*, product names, `seasonly` logo |
 | UI font | **Inter** (400–700) | Body text, labels, stats, buttons |
 | Celebration font | **Fredoka** | The puffy 3D streak counter |
-| Cream background | `#F6F1EC` | App background |
-| Ink | `#141110` | Text, pill buttons ("Start", "Add — bag"), active chips |
-| Terracotta accent | `#C47E62` | Eyebrows (BOUTIQUE, STEP 1 OF 4), links, progress rings |
-| Accent soft | `#F5E6DD` | Stat icon circles, miles chips |
+| Background | `#FBFAF9` (warm white, sampled from the live app) | App background |
+| Ink | `#0E0E10` | Text, pill buttons ("Start", "Add — bag"), active chips |
+| Terracotta accent | `#C4806C` | Eyebrows (BOUTIQUE, STEP 1 OF 4), links, progress rings |
+| Accent soft | `#F5E8E6` | Stat icon circles, miles chips |
 | Espresso | `#2A201B` | Desktop stage, Skin Miles wallet card |
 | Glass | `rgba(255,255,255,.68)` + `backdrop-filter: blur(22px) saturate(170%)` | Stats card, tab bar, miles card, buy bar |
 
