@@ -112,13 +112,56 @@ test('sign-up, wrong codes, confirmation and welcome gift', async () => {
   assert.match(c.cookie, /^sid=/);
   // The code can't be reused.
   assert.equal((await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode })).status, 410);
-  // Same details again: refused.
-  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'CAMILLE@example.fr', phone: '0611111111', consent: true });
+  // Same confirmed phone again: refused.
+  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'other@example.fr', phone: '06 99 88 77 66', consent: true });
   assert.equal(dup.status, 409);
   // The code was "sent" by SMS and logged in the outbox (no provider configured).
   const sms = ctx.db.prepare("SELECT * FROM outbox WHERE channel = 'sms' AND to_addr = '+33699887766'").get();
   assert.ok(sms.body.includes(r.data.devCode));
   assert.equal(sms.status, 'logged');
+});
+
+test('an unconfirmed email or phone cannot be used to take over an account', async () => {
+  // Attacker signs up with the victim's email but their own phone, and confirms only the SMS code.
+  const attacker = client();
+  const r = await attacker.call('POST', '/api/auth/signup', { first: 'Mallory', email: 'victim@example.fr', phone: '0655555501', consent: true, channel: 'sms' });
+  const v = await attacker.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
+  assert.equal(v.status, 200);
+  assert.equal(v.data.user.emailVerified, false);
+  assert.equal(v.data.user.phoneVerified, true);
+  // Signing in with the unconfirmed email sends nothing.
+  const probe = await client().call('POST', '/api/auth/login', { identifier: 'victim@example.fr' });
+  assert.equal(probe.status, 200);
+  assert.equal(probe.data.devCode, undefined);
+  // The real owner can still sign up with their email and takes it over by proving it.
+  const victim = client();
+  const s = await victim.call('POST', '/api/auth/signup', { first: 'Vic', email: 'victim@example.fr', phone: '0655555502', consent: true, channel: 'email' });
+  assert.equal(s.status, 200, 'not blocked by the attacker account');
+  const sv = await victim.call('POST', '/api/auth/verify', { pending: s.data.pending, code: s.data.devCode });
+  assert.equal(sv.status, 200);
+  assert.equal(sv.data.user.email, 'victim@example.fr');
+  assert.equal(sv.data.user.emailVerified, true);
+  // The attacker's account no longer holds the email, and their session can't see the victim's account.
+  const me = (await attacker.call('GET', '/api/me')).data.user;
+  assert.equal(me.email, null);
+  assert.notEqual(me.id, sv.data.user.id);
+  // Once confirmed, the email is protected: nobody else can claim it.
+  const again = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'victim@example.fr', phone: '0655555503', consent: true });
+  assert.equal(again.status, 409);
+});
+
+test('choosing both sends two different codes; each confirms its own channel', async () => {
+  const c = client();
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Both', email: 'both@example.fr', phone: '0655555510', consent: true, channel: 'both' });
+  assert.match(r.data.devEmailCode, /^\d{6}$/);
+  assert.notEqual(r.data.devCode, r.data.devEmailCode);
+  const v = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devEmailCode });
+  assert.equal(v.data.user.emailVerified, true);
+  assert.equal(v.data.user.phoneVerified, false);
+  const byPhone = await client().call('POST', '/api/auth/login', { identifier: '0655555510' });
+  assert.equal(byPhone.data.devCode, undefined, 'unconfirmed phone cannot sign in');
+  const byEmail = await client().call('POST', '/api/auth/login', { identifier: 'both@example.fr' });
+  assert.match(byEmail.data.devCode, /^\d{6}$/);
 });
 
 test('five wrong codes lock the request', async () => {
@@ -140,8 +183,9 @@ test('sign in with a code, then log out', async () => {
   const ghost = await c.call('POST', '/api/auth/login', { identifier: 'ghost@example.fr' });
   assert.equal(ghost.status, 200);
   assert.equal(ghost.data.devCode, undefined);
-  const l = await c.call('POST', '/api/auth/login', { identifier: u.email });
-  assert.equal(l.data.channel, 'email');
+  // The helper confirmed the phone (SMS code), so that's the detail that signs in.
+  const l = await c.call('POST', '/api/auth/login', { identifier: u.phone });
+  assert.equal(l.data.channel, 'sms');
   const v = await c.call('POST', '/api/auth/verify', { pending: l.data.pending, code: l.data.devCode });
   assert.equal(v.status, 200);
   assert.equal(v.data.isNew, false);
@@ -206,7 +250,7 @@ test('vouchers, checkout with server prices, and booking', async () => {
 
 test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async () => {
   const ref = client();
-  const referrer = await signup(ref);
+  const referrer = await signup(ref, { channel: 'email' }); // confirms the email, so the reward email can go out
   const friends = [];
   for (let i = 0; i < 5; i++) {
     const f = client();

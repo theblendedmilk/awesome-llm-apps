@@ -410,7 +410,7 @@
         <button class="icon-btn" data-a="auth" data-arg="${p.purpose === 'login' ? 'login' : 'signup'}" aria-label="Back">${ic('back', 18)}</button>
         <p class="eyebrow accent mt16">${p.purpose === 'login' ? 'Sign in' : 'Step 2 of 2'}</p>
         <h1 class="serif-h">Confirm your <em class="accent">${p.channel === 'email' ? 'email' : 'number'}</em></h1>
-        <p class="muted">We sent a 6-digit code ${to}. It expires in 10 minutes.</p>
+        <p class="muted">We sent a 6-digit code ${to}. ${p.channel === 'both' ? 'Each one gets its own code: enter either of them.' : ''} It expires in 10 minutes.</p>
         ${p.devCode ? `<div class="demo-code">${ic('phone', 18)}<span>${B.mode === 'demo' ? 'Demo mode — no real message is sent.' : 'Development mode.'} Your code is <b>${esc(p.devCode)}</b></span></div>` : ''}
         <form class="stack" data-form="verify" novalidate>
           <label class="field otp" for="code"><span>Confirmation code</span>
@@ -627,7 +627,7 @@
         <div class="card profile-card mt16">
           <button class="avatar-btn" data-a="photo" aria-label="Change profile photo">${avatar(72)}<span class="cam">${ic('camera', 14, 2)}</span></button>
           <div class="grow"><b>${esc(U.first)} ${esc(U.last || '')}</b><small class="muted block">${t.name} · ${nf(S.lifetime)} lifetime miles</small>
-            <small class="muted block">${esc(U.email)} · ${esc(U.phone)}</small></div>
+            <small class="muted block">${[U.email, U.phone].filter(Boolean).map(esc).join(' · ')}</small></div>
           <button class="link" data-a="rename">Edit</button>
         </div>
         <input type="file" id="photoInput" accept="image/jpeg,image/png,image/heic,image/heif,image/webp" hidden>

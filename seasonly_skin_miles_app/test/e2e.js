@@ -197,9 +197,9 @@ async function run(n, browser) {
     await f.waitForSelector('text=À bientôt');
     step('friend signs up with link + books with −10% ✓');
 
-    /* 9. Marie signs back in by email code and sees her reward */
+    /* 9. Marie signs back in by SMS code and sees her reward */
     await p.click('text=I already have an account');
-    await p.fill('#identifier', `marie${n}@example.fr`);
+    await p.fill('#identifier', '06 12 34 56 7' + n); // Marie confirmed her phone at sign-up
     await p.click('button[type="submit"]');
     await p.waitForSelector('#code');
     await p.fill('#code', await code(p));
@@ -245,7 +245,7 @@ async function run(n, browser) {
     await a.fill('#em-subject', 'The autumn edit'); await a.fill('#em-body', 'Bonjour {first},\n\nNew vouchers are live.');
     await a.click('button:has-text("Send email")');
     await a.waitForFunction(() => /email/.test(document.getElementById('toast').textContent), null, { timeout: 15000 });
-    assert.match(await a.textContent('#toast'), /2 of 2 email/);
+    assert.match(await a.textContent("#toast"), /1 of 1 email/); // only Julie confirmed her email
     await a.click('.nav button:has-text("Push notifications")');
     await a.fill('#pu-title', 'Vouchers are live'); await a.fill('#pu-body', 'Trade your miles now.');
     await a.click('button:has-text("Send notification")');

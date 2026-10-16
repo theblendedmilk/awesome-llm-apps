@@ -92,7 +92,7 @@ function createApp(opts = {}) {
   function publicUser(u) {
     const state = stateOf(u);
     return {
-      id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, referralCode: u.referral_code,
+      id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, emailVerified: !!u.email_verified, phoneVerified: !!u.phone_verified, referralCode: u.referral_code,
       hasAvatar: !!u.avatar_id, avatarVersion: u.avatar_id ? u.avatar_id.slice(0, 8) : null, state,
       push: !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ?').get(u.id),
     };
@@ -122,20 +122,24 @@ function createApp(opts = {}) {
   }
 
   /* ---------- One-time codes ---------- */
+  // Each channel gets its own code, so the code entered tells us which contact detail the person controls.
+  const newCode = () => String(crypto.randomInt(0, 1e6)).padStart(6, '0');
   async function sendCode(user, purpose, channel) {
     const id = sec.token(18);
-    const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
+    const codes = { sms: channel !== 'email' ? newCode() : null, email: channel !== 'sms' ? newCode() : null };
+    if ((codes.sms && !user.phone) || (codes.email && !user.email)) bad('This code request expired. Start again.', 410);
+    if (codes.sms && codes.email) while (codes.email === codes.sms) codes.email = newCode();
     db.prepare('DELETE FROM otps WHERE user_id = ? AND purpose = ?').run(user.id, purpose);
-    db.prepare('INSERT INTO otps (id, user_id, purpose, code_hash, channel, attempts, sent_at, expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)')
-      .run(id, user.id, purpose, sec.sha256(id + code), channel, Date.now(), Date.now() + OTP_TTL);
-    await deliverCode(user, channel, code);
-    return { id, code };
+    db.prepare('INSERT INTO otps (id, user_id, purpose, sms_hash, email_hash, channel, attempts, sent_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)')
+      .run(id, user.id, purpose, codes.sms && sec.sha256(id + codes.sms), codes.email && sec.sha256(id + codes.email), channel, Date.now(), Date.now() + OTP_TTL);
+    await deliverCode(user, codes);
+    return { id, codes };
   }
-  async function deliverCode(user, channel, code) {
-    const text = `${code} is your Seasonly code. It expires in 10 minutes. Never share it — Seasonly will never ask you for it.`;
+  async function deliverCode(user, codes) {
+    const text = (code) => `${code} is your Seasonly code. It expires in 10 minutes. Never share it — Seasonly will never ask you for it.`;
     const jobs = [];
-    if (channel === 'sms' || channel === 'both') jobs.push(notifier.sms(user.phone, `Seasonly: ${text}`));
-    if (channel === 'email' || channel === 'both') jobs.push(notifier.email(user.email, `${code} is your Seasonly code`, `Bonjour ${user.first},\n\n${text}\n\nIf you didn't ask for this code, you can ignore this email.`));
+    if (codes.sms) jobs.push(notifier.sms(user.phone, `Seasonly: ${text(codes.sms)}`));
+    if (codes.email) jobs.push(notifier.email(user.email, `${codes.email} is your Seasonly code`, `Bonjour ${user.first},\n\n${text(codes.email)}\n\nIf you didn't ask for this code, you can ignore this email.`));
     const results = await Promise.allSettled(jobs);
     if (results.every((r) => r.status === 'rejected')) bad('We could not send your code. Check your details or try the other option.', 502);
     if (production && results.every((r) => r.status === 'fulfilled' && !r.value.delivered)) bad('Code delivery is not configured yet. Contact Seasonly support.', 503);
@@ -143,7 +147,7 @@ function createApp(opts = {}) {
   const pendingResponse = (user, otp, channel) => ({
     pending: otp.id, channel,
     sentTo: { sms: channel !== 'email' ? sec.maskPhone(user.phone) : null, email: channel !== 'sms' ? sec.maskEmail(user.email) : null },
-    ...(showCodes ? { devCode: otp.code } : {}),
+    ...(showCodes ? { devCode: otp.codes.sms || otp.codes.email, ...(otp.codes.sms && otp.codes.email ? { devEmailCode: otp.codes.email } : {}) } : {}),
   });
   const channelOf = (c) => (['sms', 'email', 'both'].includes(c) ? c : 'sms');
 
@@ -192,9 +196,17 @@ function createApp(opts = {}) {
       referredBy = code;
     }
     const existing = db.prepare('SELECT * FROM users WHERE email = ? OR phone = ?').all(email, phone);
-    if (existing.some((u) => u.verified)) bad('An account already exists with this email or phone number. Sign in instead.', 409);
-    // Unverified leftovers with these details are replaced.
-    existing.forEach((u) => db.prepare('DELETE FROM users WHERE id = ?').run(u.id));
+    const owns = (u) => (u.email === email && u.email_verified) || (u.phone === phone && u.phone_verified);
+    if (existing.some((u) => u.verified && owns(u))) bad('An account already exists with this email or phone number. Sign in instead.', 409);
+    db.tx(() => existing.forEach((u) => {
+      // Unconfirmed sign-ups with these details are replaced.
+      if (!u.verified) return db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
+      // A confirmed account that never proved this email or phone loses it: whoever proves it owns it.
+      const s = stateOf(u);
+      if (u.email === email && !u.email_verified) { db.prepare('UPDATE users SET email = NULL WHERE id = ?').run(u.id); s.profile.email = ''; }
+      if (u.phone === phone && !u.phone_verified) { db.prepare('UPDATE users SET phone = NULL WHERE id = ?').run(u.id); s.profile.phone = ''; }
+      saveState(u.id, s);
+    }));
     const state = Engine.newState({ first, last, email, phone, referredBy }, now());
     const info = db.prepare('INSERT INTO users (first, last, email, phone, verified, referred_by, state, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)')
       .run(first, last, email, phone, referredBy, JSON.stringify(state), Date.now());
@@ -211,7 +223,9 @@ function createApp(opts = {}) {
     const email = sec.normalizeEmail(id), phone = email ? null : sec.normalizePhone(id);
     if (!email && !phone) bad('Enter the email or mobile number of your account.');
     if (!allow('send:' + (email || phone), 5, 60 * 60 * 1000)) bad('Too many codes requested. Try again in an hour.', 429);
-    const user = db.prepare(`SELECT * FROM users WHERE ${email ? 'email' : 'phone'} = ? AND verified = 1`).get(email || phone);
+    const user = email
+      ? db.prepare('SELECT * FROM users WHERE email = ? AND verified = 1 AND email_verified = 1').get(email)
+      : db.prepare('SELECT * FROM users WHERE phone = ? AND verified = 1 AND phone_verified = 1').get(phone);
     const channel = email ? 'email' : 'sms';
     if (!user) {
       return res.json({ pending: sec.token(18), channel, sentTo: email ? { email: sec.maskEmail(email) } : { sms: sec.maskPhone(phone) } });
@@ -240,7 +254,11 @@ function createApp(opts = {}) {
     const row = db.prepare('SELECT * FROM otps WHERE id = ?').get(String(b.pending || ''));
     if (!row || row.expires_at < Date.now()) bad('This code has expired. Ask for a new one.', 410);
     if (row.attempts >= OTP_ATTEMPTS) { db.prepare('DELETE FROM otps WHERE id = ?').run(row.id); bad('Too many wrong codes. Ask for a new one.', 429); }
-    if (code.length !== 6 || !sec.safeEqual(sec.sha256(row.id + code), row.code_hash)) {
+    const hash = sec.sha256(row.id + code);
+    const proved = code.length !== 6 ? null
+      : row.sms_hash && sec.safeEqual(hash, row.sms_hash) ? 'phone'
+      : row.email_hash && sec.safeEqual(hash, row.email_hash) ? 'email' : null;
+    if (!proved) {
       db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE id = ?').run(row.id);
       const left = OTP_ATTEMPTS - row.attempts - 1;
       bad(left > 0 ? `That code is not right. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'Too many wrong codes. Ask for a new one.', 401);
@@ -248,6 +266,9 @@ function createApp(opts = {}) {
     db.prepare('DELETE FROM otps WHERE id = ?').run(row.id);
     let user = getUser(row.user_id);
     if (!user) bad('This account no longer exists.', 410);
+    if (!user[proved]) bad('This code request expired. Start again.', 410); // the detail was claimed by someone who proved it
+    db.prepare(`UPDATE users SET ${proved === 'email' ? 'email_verified' : 'phone_verified'} = 1 WHERE id = ?`).run(user.id);
+    user = getUser(user.id);
     if (row.purpose === 'signup' && !user.verified) {
       db.tx(() => {
         const code = referralCode(user.first);
@@ -257,7 +278,7 @@ function createApp(opts = {}) {
         db.prepare('UPDATE users SET verified = 1, referral_code = ?, state = ? WHERE id = ?').run(code, JSON.stringify(state), user.id);
       });
       user = getUser(user.id);
-      notifier.email(user.email, 'Welcome to Seasonly', `Bonjour ${user.first},\n\nYour account is confirmed and 300 Skin Miles are waiting for you.\n\nYour referral code is ${user.referral_code}. Share it: your friends get ${settings().referral.welcome}% off their first Face Glow Bar treatment, and you earn ${settings().referral.perFriend}% off your next booking for each friend who books (up to ${settings().referral.cap}%).`).catch(() => {});
+      if (user.email_verified) notifier.email(user.email, 'Welcome to Seasonly', `Bonjour ${user.first},\n\nYour account is confirmed and 300 Skin Miles are waiting for you.\n\nYour referral code is ${user.referral_code}. Share it: your friends get ${settings().referral.welcome}% off their first Face Glow Bar treatment, and you earn ${settings().referral.perFriend}% off your next booking for each friend who books (up to ${settings().referral.cap}%).`).catch(() => {});
     }
     startSession(res, user.id);
     res.json({ user: publicUser(user), isNew: row.purpose === 'signup' });
@@ -311,7 +332,7 @@ function createApp(opts = {}) {
     });
     referrals.forEach(({ referrer, discount, friend }) => {
       notifier.push([referrer.id], { title: 'Your friend booked 🎉', body: `${friend} booked a Face Glow Bar treatment. You now have ${discount}% off your next booking.`, url: '/#book' }).catch(() => {});
-      notifier.email(referrer.email, `${friend} just booked — your reward is ready`, `Bonjour ${referrer.first},\n\n${friend} confirmed their Seasonly account and booked a treatment with your code.\n\nYou now have ${discount}% off your next Face Glow Bar booking, plus 200 Skin Miles.`).catch(() => {});
+      if (referrer.email && referrer.email_verified) notifier.email(referrer.email, `${friend} just booked — your reward is ready`, `Bonjour ${referrer.first},\n\n${friend} confirmed their Seasonly account and booked a treatment with your code.\n\nYou now have ${discount}% off your next Face Glow Bar booking, plus 200 Skin Miles.`).catch(() => {});
     });
     res.json({ state: out.state, events: out.events.filter((e) => e.type !== 'referralQualified'), result: out.result });
   }));
@@ -505,7 +526,9 @@ function createApp(opts = {}) {
     const b = req.body || {};
     const subject = String(b.subject || '').trim().slice(0, 150), body = String(b.body || '').trim().slice(0, 10000);
     if (!subject || !body) bad('Write a subject and a message.');
-    const list = audience(b);
+    // Never email an address the customer didn't confirm.
+    const list = audience(b).filter((u) => u.email && u.email_verified);
+    if (b.audience === 'one' && !list.length) bad('No confirmed customer with that email.');
     let sent = 0, failed = 0;
     for (const u of list) {
       try { await notifier.email(u.email, subject, body.replace(/\{first\}/g, u.first)); sent++; } catch { failed++; }
