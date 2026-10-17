@@ -45,6 +45,9 @@ async function run(n, browser) {
   const step = (msg) => { console.log(`  [run ${n}] ${msg}`); doing = `after "${msg}"`; };
   const code = async (page) => (await page.textContent('.demo-code b')).trim();
   const tab = (page, name) => page.click(`.tab[aria-label="${name}"]`);
+  const fillAddress = async (page, line1, postcode, city) => { await page.fill('#line1', line1); await page.fill('#postcode', postcode); await page.fill('#city', city); };
+  // A section counts as "shown" when its anchor sits near the top of the scrolled app view.
+  const sectionShown = (page, id) => page.waitForFunction((x) => { const el = document.getElementById(x); if (!el) return false; const r = el.getBoundingClientRect(); return r.top > -40 && r.top < 260; }, id, { timeout: 5000 });
   // Wait for the count-up animation to finish before reading the balance.
   const miles = async (page) => { await page.waitForFunction(() => !document.querySelector('[data-miles].bump'), null, { timeout: 5000 }); return Number((await page.textContent('[data-miles]')).replace(/\D/g, '')); };
   // Staff actions (mark a booking as paid) go through the admin API.
@@ -66,6 +69,7 @@ async function run(n, browser) {
     assert.match(await p.textContent('.form-error'), /first name/, 'validation shows');
     await p.fill('#first', 'Marie'); await p.fill('#last', 'Dupont');
     await p.fill('#email', `marie${n}@example.fr`); await p.fill('#phone', '06 12 34 56 7' + n);
+    await fillAddress(p, '12 rue de Turenne', '75004', 'Paris');
     await p.click('.seg label:has-text("Both")');
     await p.check('#consent');
     await shot(p, '02-signup');
@@ -155,6 +159,12 @@ async function run(n, browser) {
     await p.click('.icon-btn[aria-label="Bag"]');
     await p.waitForSelector('[data-a="checkout"]');
     assert.match(await p.textContent('.sheet-card'), /€26/);
+    // "Have miles? Redeem a seasonal voucher" opens Rewards right at the vouchers.
+    await p.click('[data-a="go-rewards"]');
+    await sectionShown(p, 'vouchers');
+    await tab(p, 'Shop');
+    await p.click('.icon-btn[aria-label="Bag"]');
+    await p.waitForSelector('[data-a="checkout"]');
     const beforeOrder = await miles(p);
     await p.click('[data-a="checkout"]');
     await p.waitForSelector('text=Order received');
@@ -189,7 +199,9 @@ async function run(n, browser) {
     step('support + feature idea ✓');
 
     /* 7. Referral code, then log out */
+    await tab(p, 'Rewards');
     const refCode = (await p.textContent('.referral .code')).trim();
+    await tab(p, 'Profile');
     assert.match(refCode, /^MARIE[A-Z2-9]{4}$/);
     await p.click('[data-a="logout"]');
     await p.click('[data-a="logout-ok"]');
@@ -205,6 +217,7 @@ async function run(n, browser) {
     await f.waitForSelector('#referral');
     assert.equal(await f.inputValue('#referral'), refCode);
     await f.fill('#first', 'Julie'); await f.fill('#email', `julie${n}@example.fr`); await f.fill('#phone', '07 11 22 33 4' + n);
+    await fillAddress(f, '8 rue du Plat', '69002', 'Lyon');
     await f.check('#consent');
     await f.click('button[type="submit"]');
     await f.waitForSelector('#code');
@@ -233,6 +246,8 @@ async function run(n, browser) {
     await tab(f, 'Home');
     const juliesBefore = await miles(f);
     const paid = await admin('POST', `/bookings/${bk.userId}/${bookingId}/pay`);
+    const created = await admin('POST', '/contests', { period: 'week', prizeKind: 'soin', prizeRef: 'signature' });
+    assert.ok(created.contest.id, 'contest created');
     assert.equal(paid.item.status, 'paid');
     await f.reload(); await f.waitForSelector('.stats');
     assert.equal(await miles(f), juliesBefore + 150);
@@ -252,7 +267,9 @@ async function run(n, browser) {
     await p.waitForSelector('#code');
     await p.fill('#code', await code(p));
     await p.waitForSelector('.stats');
-    await tab(p, 'Rewards');
+    // "Invite a friend" on Home opens Rewards at the Invite friends section.
+    await p.click('.ref-teaser');
+    await sectionShown(p, 'invite');
     const rewards = await p.textContent('.referral');
     assert.match(rewards, /1 friend has come in/);
     assert.match(rewards, /current reward −5%/);
@@ -303,6 +320,15 @@ async function run(n, browser) {
     const outbox = await a.textContent('table');
     assert.match(outbox, /The autumn edit/); assert.match(outbox, /Vouchers are live/); assert.match(outbox, /is your Seasonly code/);
     await shot(a, '14-admin-outbox');
+    // Marie enters this week's contest; the admin draws her as the winner.
+    await tab(p, 'Rewards');
+    await p.waitForSelector('[data-a="enter-contest"]');
+    await p.click('[data-a="enter-contest"]');
+    await p.waitForSelector('#contestList .entered');
+    await a.click('.nav button:has-text("Contests")');
+    await a.waitForSelector('[data-a="draw"]');
+    await a.click('[data-a="draw"]');
+    await a.waitForFunction(() => /Winner: Marie/.test(document.getElementById('toast').textContent), null, { timeout: 15000 });
     await a.click('.nav button:has-text("Inbox")');
     await a.waitForSelector('.msg-card');
     const inbox = await a.textContent('.main');
@@ -315,9 +341,19 @@ async function run(n, browser) {
     assert.match(await a.textContent('table'), /Julie/);
     step('admin: product + photo + email + push ✓');
 
-    /* 11. Shop shows the admin's new product */
+    /* 11. Marie's prize is in her profile; the profile invite link opens Rewards */
     await p.reload();
     await p.waitForSelector('.stats');
+    await tab(p, 'Profile');
+    await p.waitForSelector('#giftList .gift');
+    assert.match(await p.textContent('#giftList'), /Soin Signature[\s\S]*Ready to book/);
+    assert.match(await p.textContent('.addr-card'), /12 rue de Turenne/);
+    await shot(p, '15-gifts');
+    await p.click('#app .ref-teaser');
+    await sectionShown(p, 'invite');
+    assert.match(await p.textContent('#contestList'), /You won/);
+    step('contest won + gift in profile + section links ✓');
+    /* 12. Shop shows the admin's new product */
     await tab(p, 'Shop');
     await p.click('.chip:has-text("All")');
     await p.fill('#search', 'Brume');
@@ -330,7 +366,8 @@ async function run(n, browser) {
     await d.goto('file://' + path.join(__dirname, '..', 'public', 'index.html'));
     await d.waitForSelector('text=Demo mode');
     await d.click('text=Create my account');
-    await d.fill('#first', 'Léa'); await d.fill('#email', 'lea@example.fr'); await d.fill('#phone', '0611223344'); await d.check('#consent');
+    await d.fill('#first', 'Léa'); await d.fill('#email', 'lea@example.fr'); await d.fill('#phone', '0611223344');
+    await fillAddress(d, '5 cours Mirabeau', '13100', 'Aix-en-Provence'); await d.check('#consent');
     await d.click('button[type="submit"]');
     await d.waitForSelector('.demo-code');
     await d.fill('#code', await code(d));

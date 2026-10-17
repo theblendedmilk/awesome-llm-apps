@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   referred_by TEXT,
   state TEXT NOT NULL,
   avatar_id TEXT,
+  address TEXT,
   created_at INTEGER NOT NULL,
   last_login INTEGER
 );
@@ -85,6 +86,41 @@ CREATE TABLE IF NOT EXISTS messages (
   replied_at INTEGER,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS contests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  period TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prize_kind TEXT NOT NULL,
+  prize_ref TEXT NOT NULL,
+  prize_label TEXT NOT NULL,
+  winners INTEGER NOT NULL DEFAULT 1,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  winner_ids TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contest_entries (
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (contest_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS gifts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  label TEXT NOT NULL,
+  source TEXT NOT NULL,
+  note TEXT,
+  status TEXT NOT NULL,
+  code TEXT,
+  address TEXT,
+  created_at INTEGER NOT NULL,
+  shipped_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -102,6 +138,9 @@ function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Columns added after the first release.
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!cols.includes('address')) db.exec('ALTER TABLE users ADD COLUMN address TEXT');
 
   const q = (sql) => db.prepare(sql);
   db.tx = (fn) => {

@@ -32,7 +32,7 @@
   };
   const milesCell = (x) => (x.credited ? `${x.status === 'refunded' ? '−' : '+'}${nf(x.credited)}` : `<span class="muted">${nf(x.miles || 0)} on payment</span>`);
   const state = { me: null, view: 'dashboard', data: {}, q: '', modal: null, error: '' };
-  const VIEWS = [['dashboard', 'Dashboard'], ['inbox', 'Inbox'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
+  const VIEWS = [['dashboard', 'Dashboard'], ['inbox', 'Inbox'], ['contests', 'Contests'], ['gifts', 'Gifts'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
     ['referrals', 'Referrals'], ['email', 'Email'], ['push', 'Push notifications'], ['outbox', 'Sent messages'], ['settings', 'Settings']];
 
   /* ---------- Views ---------- */
@@ -95,6 +95,52 @@
           <td>${o.lines.map((l) => `${l.qty} × ${esc(l.name)}`).join('<br>')}</td><td class="num">${eur(o.subtotal)}</td>
           <td class="num">${o.discount ? `−${eur(o.discount)}<div class="muted">${esc(o.voucher)}</div>` : '—'}</td><td class="num"><b>${eur(o.total)}</b></td><td>${statusPill(o)}<div class="muted">${when(o.t)}</div></td>
           <td class="num">${milesCell(o)}</td><td class="num">${payButtons('orders', o)}</td></tr>`).join('')}
+        </tbody></table></div>`}`;
+    },
+    contests() {
+      const d = state.data.contestData;
+      if (!d) return '<p class="muted">Loading…</p>';
+      const prizeOptions = (kind) => (kind === 'product' ? d.products : d.services).map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
+      const kind = state.prizeKind || 'soin';
+      return `<p class="eyebrow">Engagement</p><h1 class="title">Contests</h1>
+        <div class="grid2"><form class="card stack" data-form="contest">
+          <h3>New contest</h3>
+          <div class="f3"><label class="f">Type<select name="period" id="ct-period">${Object.entries(d.periods).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
+            <label class="f">Prize<select name="prizeKind" id="ct-kind">${[['soin', 'A treatment (soin)'], ['product', 'A product']].map(([k, l]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+            <label class="f">Winners<input type="number" name="winners" id="ct-winners" min="1" max="20" value="1"></label></div>
+          <label class="f">Which one<select name="prizeRef" id="ct-ref">${prizeOptions(kind)}</select></label>
+          <label class="f">Title (optional)<input name="title" id="ct-title" maxlength="80" placeholder="Contest of the week: win a Soin Signature"></label>
+          <label class="f">Description (optional)<textarea name="description" id="ct-desc" maxlength="600" style="min-height:80px" placeholder="How to enter, what you win…"></textarea></label>
+          <label class="f">Ends on (optional)<input type="date" name="endsAt" id="ct-ends"><span class="hint">Leave empty to end with the week, month or year.</span></label>
+          <label class="check"><input type="checkbox" name="announce" id="ct-announce" checked> Announce it with a push notification</label>
+          ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
+          <button class="btn">Launch the contest</button>
+        </form>
+        <div class="card"><h3>How it works</h3><p class="muted" style="margin-top:8px">Customers enter from the Rewards tab (a postal address is required). When the contest ends, press <b>Draw winner</b>: winners are picked at random among the entrants and the prize appears in their profile under My gifts, with a push notification and an email. A treatment becomes a free-treatment voucher; a product appears in Gifts, ready to ship.</p></div></div>
+        <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Contest</th><th>Prize</th><th>Ends</th><th class="num">Entries</th><th>Status</th><th></th></tr></thead><tbody>
+        ${d.contests.map((c) => `<tr><td><b>${esc(c.title)}</b><div class="muted">${esc(d.periods[c.period])}</div></td><td>${esc(c.prizeLabel)}${c.winners > 1 ? ` × ${c.winners}` : ''}</td>
+          <td>${when(c.endsAt)}</td><td class="num">${nf(c.entries)}</td>
+          <td>${c.status === 'open' ? `<span class="pill ok">Open</span>` : c.status === 'drawn' ? `<span class="pill soft">Won by ${esc(c.winnerNames.join(', '))}</span>` : '<span class="pill grey">Closed</span>'}</td>
+          <td class="num">${c.status === 'open' ? `<button class="btn sm" data-a="draw" data-id="${c.id}">Draw winner</button> <button class="btn ghost sm" data-a="close-contest" data-id="${c.id}">Close</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No contest yet.</td></tr>'}
+        </tbody></table></div>`;
+    },
+    gifts() {
+      const list = state.data.gifts, d = state.data.contestData;
+      const GS = { available: ['ok', 'Voucher ready'], used: ['grey', 'Used'], expired: ['grey', 'Expired'], to_ship: ['bad', 'To ship'], shipped: ['ok', 'Shipped'], needs_address: ['soft', 'Waiting for address'] };
+      const kind = state.giftKind || 'soin';
+      return `<p class="eyebrow">Engagement</p><h1 class="title">Gifts</h1>
+        ${d ? `<form class="card stack" data-form="gift" style="margin-bottom:16px"><h3>Give a gift</h3>
+          <div class="f3"><label class="f">Customer email<input name="to" id="gf-to" type="email" required placeholder="marie@example.fr"></label>
+            <label class="f">Gift<select name="kind" id="gf-kind">${[['soin', 'A treatment (soin)'], ['product', 'A product']].map(([k, l]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+            <label class="f">Which one<select name="ref" id="gf-ref">${(kind === 'product' ? d.products : d.services).map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></label></div>
+          <label class="f">Reason shown to the customer<input name="reason" id="gf-reason" maxlength="80" placeholder="Thank you for being a loyal client"></label>
+          ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
+          <div class="row"><button class="btn">Give the gift</button></div></form>` : ''}
+        ${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No gift given yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Gift</th><th>Why</th><th>Ship to</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map((g) => { const [c, l] = GS[g.status] || ['grey', g.status]; return `<tr><td>${esc(g.customer)}<div class="muted">${esc(g.email || g.phone || '')}</div></td>
+          <td><b>${esc(g.label)}</b><div class="muted">${g.kind === 'soin' ? `Voucher ${esc(g.code)}` : 'Product'}</div></td><td>${esc(g.source)}<div class="muted">${when(g.createdAt)}</div></td>
+          <td>${g.address ? `${esc(g.address.line1)}${g.address.line2 ? `, ${esc(g.address.line2)}` : ''}<div class="muted">${esc(g.address.postcode)} ${esc(g.address.city)}, ${esc(g.address.country)}</div>` : '—'}</td>
+          <td><span class="pill ${c}">${l}</span></td><td class="num">${g.status === 'to_ship' ? `<button class="btn sm" data-a="shipped" data-id="${g.id}">Mark as shipped</button>` : ''}</td></tr>`; }).join('')}
         </tbody></table></div>`}`;
     },
     inbox() {
@@ -242,6 +288,7 @@
   }
   async function load(view) {
     const map = { dashboard: [['stats', '/stats']], products: [['products', '/products']], customers: [['users', `/users?q=${encodeURIComponent(state.q)}`]],
+      contests: [['contestData', '/contests']], gifts: [['gifts', '/gifts'], ['contestData', '/contests']],
       bookings: [['bookings', '/bookings']], orders: [['orders', '/orders']], inbox: [['messages', `/messages${state.inboxKind ? `?kind=${state.inboxKind}` : ''}`]], referrals: [['referrals', '/referrals'], ['settings', '/settings']],
       outbox: [['outbox', '/outbox']], settings: [['settings', '/settings']], push: [['stats', '/stats']], email: [] };
     const jobs = map[view] || [];
@@ -270,6 +317,11 @@
     'modal-close'() { state.modal = null; state.error = ''; render(); },
     'modal-bg'(el, e) { if (e.target === el) A['modal-close'](); },
     miles(el) { state.error = ''; state.modal = milesModal(el.dataset.id, el.dataset.name); render(); },
+    async draw(el) {
+      try { const r = await api('POST', `/contests/${el.dataset.id}/draw`); toast(`Winner: ${r.winners.map((w) => w.name).join(', ')}`); load('contests'); } catch (e) { toast(e.message); }
+    },
+    async 'close-contest'(el) { try { await api('POST', `/contests/${el.dataset.id}/close`); toast('Contest closed'); load('contests'); } catch (e) { toast(e.message); } },
+    async shipped(el) { try { await api('POST', `/gifts/${el.dataset.id}/shipped`); toast('Marked as shipped · the customer is notified'); load('gifts'); } catch (e) { toast(e.message); } },
     async pay(el) {
       try { const r = await api('POST', `/${el.dataset.kind}/${el.dataset.user}/${encodeURIComponent(el.dataset.id)}/pay`); toast(`Marked as paid · +${r.item.credited} miles credited`); load(state.view); } catch (e) { toast(e.message); }
     },
@@ -314,6 +366,14 @@
       toast(`Delivered to ${r.sent} of ${r.subscriptions} device(s)`);
       f.reset();
     },
+    async contest(f) {
+      await api('POST', '/contests', { period: f.period.value, prizeKind: f.prizeKind.value, prizeRef: f.prizeRef.value, winners: f.winners.value, title: f.title.value, description: f.description.value, endsAt: f.endsAt.value ? `${f.endsAt.value}T23:59:59` : '', announce: f.announce.checked });
+      toast('Contest launched'); f.reset(); load('contests');
+    },
+    async gift(f) {
+      const r = await api('POST', '/gifts', { to: f.to.value, kind: f.kind.value, ref: f.ref.value, reason: f.reason.value });
+      toast(`${r.gift.label} given`); f.reset(); load('gifts');
+    },
     async reply(f) {
       await api('POST', `/messages/${f.dataset.id}/reply`, { body: f.body.value });
       toast('Reply sent'); load('inbox');
@@ -338,13 +398,19 @@
       state.error = err.message;
       if (name === 'product') state.modal = productModal(state.editing);
       else if (name === 'miles') state.modal = milesModal(f.dataset.id, '');
-      if (['login', 'product', 'miles', 'email', 'push'].includes(name)) { const keep = new FormData(f); render(); restore(keep); } else toast(err.message);
+      if (['login', 'product', 'miles', 'email', 'push', 'contest', 'gift'].includes(name)) { const keep = new FormData(f); render(); restore(keep); } else toast(err.message);
     }
     if (btn && btn.isConnected) btn.disabled = false;
   });
   function restore(fd) { for (const [k, v] of fd.entries()) { const el = root.querySelector(`[name="${k}"]`); if (el && el.type !== 'checkbox' && el.type !== 'file') el.value = v; } }
   document.addEventListener('change', async (e) => {
     const t = e.target;
+    if (t.id === 'ct-kind' || t.id === 'gf-kind') {
+      // Switch the list of treatments / products without losing the rest of the form.
+      const d = state.data.contestData, sel = document.getElementById(t.id === 'ct-kind' ? 'ct-ref' : 'gf-ref');
+      if (t.id === 'ct-kind') state.prizeKind = t.value; else state.giftKind = t.value;
+      sel.innerHTML = (t.value === 'product' ? d.products : d.services).map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
+    }
     if (t.name === 'audience') { const wrap = document.getElementById(t.id.replace('-aud', '-to-wrap')); if (wrap) wrap.hidden = t.value !== 'one'; }
     if ((t.id === 'pimg' || t.id === 'hero-file') && t.files[0]) {
       const file = t.files[0];

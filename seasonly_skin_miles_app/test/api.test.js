@@ -36,10 +36,11 @@ function client() {
   }
   return { call, get cookie() { return cookie; } };
 }
+const ADDR = { line1: '12 rue de Turenne', postcode: '75004', city: 'Paris', country: 'France' };
 let phoneN = 10;
 async function signup(c, extra = {}) {
   phoneN += 1;
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Marie', last: 'Dupont', email: `user${phoneN}@example.fr`, phone: `06 12 34 56 ${phoneN}`, consent: true, channel: 'both', ...extra });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Marie', last: 'Dupont', email: `user${phoneN}@example.fr`, phone: `06 12 34 56 ${phoneN}`, consent: true, address: ADDR, channel: 'both', ...extra });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   const v = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
   assert.equal(v.status, 200, JSON.stringify(v.data));
@@ -91,17 +92,20 @@ test('security headers and CSRF guard', async () => {
 
 test('sign-up validation', async () => {
   const c = client();
-  const bad = async (body, re) => { const r = await c.call('POST', '/api/auth/signup', { first: 'A', email: 'a@b.fr', phone: '0612345678', consent: true, ...body }); assert.equal(r.status, 400); assert.match(r.data.error, re); };
+  const bad = async (body, re) => { const r = await c.call('POST', '/api/auth/signup', { first: 'A', email: 'a@b.fr', phone: '0612345678', consent: true, address: ADDR, ...body }); assert.equal(r.status, 400); assert.match(r.data.error, re); };
   await bad({ first: '' }, /first name/);
   await bad({ email: 'nope' }, /email/);
   await bad({ phone: '123' }, /mobile/);
   await bad({ consent: false }, /accept/);
   await bad({ referral: 'NOPE1234' }, /referral code/);
+  await bad({ address: { line1: '', postcode: '75004', city: 'Paris' } }, /street address/);
+  await bad({ address: { ...ADDR, postcode: '!' } }, /postcode/);
+  await bad({ address: { ...ADDR, country: 'Spain' } }, /ship to/);
 });
 
 test('sign-up, wrong codes, confirmation and welcome gift', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Camille', email: 'camille@example.fr', phone: '+33 6 99 88 77 66', consent: true, channel: 'sms' });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Camille', email: 'camille@example.fr', phone: '+33 6 99 88 77 66', consent: true, address: ADDR, channel: 'sms' });
   assert.equal(r.status, 200);
   assert.match(r.data.devCode, /^\d{6}$/);
   assert.equal(r.data.sentTo.sms, '+33 •• •• •• 66');
@@ -120,7 +124,7 @@ test('sign-up, wrong codes, confirmation and welcome gift', async () => {
   // The code can't be reused.
   assert.equal((await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode })).status, 410);
   // Same confirmed phone again: refused.
-  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'other@example.fr', phone: '06 99 88 77 66', consent: true });
+  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'other@example.fr', phone: '06 99 88 77 66', consent: true, address: ADDR });
   assert.equal(dup.status, 409);
   // The code was "sent" by SMS and logged in the outbox (no provider configured).
   const sms = ctx.db.prepare("SELECT * FROM outbox WHERE channel = 'sms' AND to_addr = '+33699887766'").get();
@@ -131,7 +135,7 @@ test('sign-up, wrong codes, confirmation and welcome gift', async () => {
 test('an unconfirmed email or phone cannot be used to take over an account', async () => {
   // Attacker signs up with the victim's email but their own phone, and confirms only the SMS code.
   const attacker = client();
-  const r = await attacker.call('POST', '/api/auth/signup', { first: 'Mallory', email: 'victim@example.fr', phone: '0655555501', consent: true, channel: 'sms' });
+  const r = await attacker.call('POST', '/api/auth/signup', { first: 'Mallory', email: 'victim@example.fr', phone: '0655555501', consent: true, address: ADDR, channel: 'sms' });
   const v = await attacker.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
   assert.equal(v.status, 200);
   assert.equal(v.data.user.emailVerified, false);
@@ -142,7 +146,7 @@ test('an unconfirmed email or phone cannot be used to take over an account', asy
   assert.equal(probe.data.devCode, undefined);
   // The real owner can still sign up with their email and takes it over by proving it.
   const victim = client();
-  const s = await victim.call('POST', '/api/auth/signup', { first: 'Vic', email: 'victim@example.fr', phone: '0655555502', consent: true, channel: 'email' });
+  const s = await victim.call('POST', '/api/auth/signup', { first: 'Vic', email: 'victim@example.fr', phone: '0655555502', consent: true, address: ADDR, channel: 'email' });
   assert.equal(s.status, 200, 'not blocked by the attacker account');
   const sv = await victim.call('POST', '/api/auth/verify', { pending: s.data.pending, code: s.data.devCode });
   assert.equal(sv.status, 200);
@@ -153,13 +157,13 @@ test('an unconfirmed email or phone cannot be used to take over an account', asy
   assert.equal(me.email, null);
   assert.notEqual(me.id, sv.data.user.id);
   // Once confirmed, the email is protected: nobody else can claim it.
-  const again = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'victim@example.fr', phone: '0655555503', consent: true });
+  const again = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'victim@example.fr', phone: '0655555503', consent: true, address: ADDR });
   assert.equal(again.status, 409);
 });
 
 test('choosing both sends two different codes; each confirms its own channel', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Both', email: 'both@example.fr', phone: '0655555510', consent: true, channel: 'both' });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Both', email: 'both@example.fr', phone: '0655555510', consent: true, address: ADDR, channel: 'both' });
   assert.match(r.data.devEmailCode, /^\d{6}$/);
   assert.notEqual(r.data.devCode, r.data.devEmailCode);
   const v = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devEmailCode });
@@ -173,7 +177,7 @@ test('choosing both sends two different codes; each confirms its own channel', a
 
 test('five wrong codes lock the request', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Lock', email: 'lock@example.fr', phone: '0677777777', consent: true });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Lock', email: 'lock@example.fr', phone: '0677777777', consent: true, address: ADDR });
   const wrong = String((Number(r.data.devCode) + 7) % 1e6).padStart(6, '0');
   for (let i = 0; i < 5; i++) await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: wrong });
   const after = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
@@ -361,7 +365,7 @@ test('admin panel is closed without a password; codes only go to served countrie
   const res = await fetch(`http://127.0.0.1:${s2.address().port}/api/admin/login`, { method: 'POST', headers: { 'X-Seasonly': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@seasonly.fr', password: 'seasonly-admin' }) });
   assert.equal(res.status, 503);
   s2.close();
-  const uk = await client().call('POST', '/api/auth/signup', { first: 'Al', email: 'al@example.co.uk', phone: '+447700900123', consent: true });
+  const uk = await client().call('POST', '/api/auth/signup', { first: 'Al', email: 'al@example.co.uk', phone: '+447700900123', consent: true, address: ADDR });
   assert.equal(uk.status, 400);
   assert.match(uk.data.error, /France/);
 });
@@ -394,7 +398,7 @@ test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async 
   me = (await ref.call('GET', '/api/me')).data.user.state;
   assert.equal(me.referral.discount, 0, 'reward used');
   // Own code is refused.
-  const self = await client().call('POST', '/api/auth/signup', { first: 'Me', email: referrer.email, phone: '0600000099', consent: true, referral: referrer.referralCode });
+  const self = await client().call('POST', '/api/auth/signup', { first: 'Me', email: referrer.email, phone: '0600000099', consent: true, address: ADDR, referral: referrer.referralCode });
   assert.equal(self.status, 400);
   // Referrer was notified by email.
   assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(referrer.email, '%reward is ready%'));
@@ -520,4 +524,84 @@ test('admin panel API', async () => {
   assert.equal((await cust.call('GET', '/api/admin/stats')).status, 401);
   assert.equal((await a.call('POST', '/api/admin/logout')).status, 200);
   assert.equal((await a.call('GET', '/api/admin/stats')).status, 401);
+});
+
+test('signup stores the postal address; customers can update it', async () => {
+  const c = client();
+  const u = await signup(c);
+  assert.equal(u.address.city, 'Paris');
+  const r = await c.call('PUT', '/api/me/address', { address: { line1: '3 place Bellecour', postcode: '69002', city: 'Lyon', country: 'France' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.user.address.city, 'Lyon');
+  assert.equal((await c.call('PUT', '/api/me/address', { address: { line1: 'x' } })).status, 400);
+});
+
+test('contests: enter, draw a random winner, prize appears in the winner profile', async () => {
+  const a = await adminClient();
+  // A soin contest of the week with 1 winner.
+  let r = await a.call('POST', '/api/admin/contests', { period: 'week', prizeKind: 'soin', prizeRef: 'signature', winners: 1, announce: true });
+  assert.equal(r.status, 201);
+  const contest = r.data.contest;
+  assert.equal(contest.title, 'Win a Soin Signature');
+  assert.ok(contest.endsAt > Date.now());
+  assert.equal((await a.call('POST', `/api/admin/contests/${contest.id}/draw`)).status, 400, 'nobody entered yet');
+  const players = [];
+  for (let i = 0; i < 3; i++) { const c = client(); const u = await signup(c); players.push({ c, u }); }
+  // Anyone can see the contest; entering needs an account.
+  let list = (await client().call('GET', '/api/contests')).data.contests;
+  assert.ok(list.find((x) => x.id === contest.id && !x.entered));
+  assert.equal((await client().call('POST', `/api/contests/${contest.id}/enter`)).status, 401);
+  for (const { c } of players) {
+    assert.equal((await c.call('POST', `/api/contests/${contest.id}/enter`)).status, 200);
+    assert.equal((await c.call('POST', `/api/contests/${contest.id}/enter`)).status, 200, 'entering twice is harmless');
+  }
+  list = (await players[0].c.call('GET', '/api/contests')).data.contests;
+  const mine = list.find((x) => x.id === contest.id);
+  assert.equal(mine.entered, true);
+  assert.equal(mine.entries, 3);
+  // Customers can't draw.
+  assert.equal((await players[0].c.call('POST', `/api/admin/contests/${contest.id}/draw`)).status, 401);
+  r = await a.call('POST', `/api/admin/contests/${contest.id}/draw`);
+  assert.equal(r.status, 200);
+  assert.equal(r.data.winners.length, 1);
+  const winner = players.find((p) => p.u.id === r.data.winners[0].id);
+  assert.ok(winner, 'winner is one of the entrants');
+  assert.equal((await a.call('POST', `/api/admin/contests/${contest.id}/draw`)).status, 400, 'cannot draw twice');
+  assert.equal((await winner.c.call('POST', `/api/contests/${contest.id}/enter`)).status, 422, 'closed after the draw');
+  // The prize is in the winner's gifts as a free-treatment voucher that makes the booking free.
+  const gifts = (await winner.c.call('GET', '/api/me/gifts')).data.gifts;
+  assert.equal(gifts.length, 1);
+  assert.equal(gifts[0].status, 'available');
+  assert.match(gifts[0].code, /^GIFT-/);
+  const b = await act(winner.c, 'book', { studio: 'canopee', service: 'signature', day: 2, slot: '10:00', voucher: gifts[0].code });
+  assert.equal(b.data.result.booking.price, 0);
+  assert.equal((await winner.c.call('GET', '/api/me/gifts')).data.gifts[0].status, 'used');
+  const won = (await winner.c.call('GET', '/api/contests')).data.contests.find((x) => x.id === contest.id);
+  assert.equal(won.won, true);
+  assert.ok(ctx.db.prepare("SELECT 1 FROM outbox WHERE channel = 'push' AND subject LIKE ?").get('%A gift from Seasonly%'));
+  // Losers have no gift.
+  const loser = players.find((p) => p !== winner);
+  assert.equal((await loser.c.call('GET', '/api/me/gifts')).data.gifts.length, 0);
+});
+
+test('product giveaway ships to the saved address', async () => {
+  const a = await adminClient();
+  const c = client();
+  const u = await signup(c, { channel: 'email' });
+  assert.equal((await a.call('POST', '/api/admin/gifts', { to: 'nobody@example.fr', kind: 'product', ref: 'creme-riche' })).status, 400);
+  let r = await a.call('POST', '/api/admin/gifts', { to: u.email, kind: 'product', ref: 'creme-riche', reason: 'Thank you for your loyalty' });
+  assert.equal(r.status, 201);
+  let g = (await c.call('GET', '/api/me/gifts')).data.gifts[0];
+  assert.equal(g.status, 'to_ship');
+  assert.equal(g.address.line1, '12 rue de Turenne');
+  // Moving before it ships: the gift follows the new address.
+  await c.call('PUT', '/api/me/address', { address: { line1: '8 rue du Plat', postcode: '69002', city: 'Lyon', country: 'France' } });
+  g = (await c.call('GET', '/api/me/gifts')).data.gifts[0];
+  assert.equal(g.address.city, 'Lyon');
+  const admGift = (await a.call('GET', '/api/admin/gifts')).data.gifts.find((x) => x.id === g.id);
+  assert.equal(admGift.address.city, 'Lyon');
+  assert.equal((await a.call('POST', `/api/admin/gifts/${g.id}/shipped`)).status, 200);
+  assert.equal((await c.call('GET', '/api/me/gifts')).data.gifts[0].status, 'shipped');
+  assert.equal((await a.call('POST', `/api/admin/gifts/${g.id}/shipped`)).status, 400, 'only once');
+  assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject = ?').get(u.email, 'Your gift is on its way'));
 });

@@ -98,7 +98,7 @@ function createApp(opts = {}) {
     const state = stateOf(u);
     return {
       id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, emailVerified: !!u.email_verified, phoneVerified: !!u.phone_verified, referralCode: u.referral_code,
-      hasAvatar: !!u.avatar_id, avatarVersion: u.avatar_id ? u.avatar_id.slice(0, 8) : null, state,
+      hasAvatar: !!u.avatar_id, avatarVersion: u.avatar_id ? u.avatar_id.slice(0, 8) : null, state, address: addressOf(u),
       push: !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ?').get(u.id),
     };
   }
@@ -155,6 +155,19 @@ function createApp(opts = {}) {
     ...(showCodes ? { devCode: otp.codes.sms || otp.codes.email, ...(otp.codes.sms && otp.codes.email ? { devEmailCode: otp.codes.email } : {}) } : {}),
   });
   const channelOf = (c) => (['sms', 'email', 'both'].includes(c) ? c : 'sms');
+  // Postal address, required so prizes and gifts can be shipped.
+  const COUNTRIES = ['France', 'Belgique', 'Suisse', 'Luxembourg', 'Monaco'];
+  function cleanAddress(a) {
+    a = a || {};
+    const str = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+    const out = { line1: str(a.line1, 120), line2: str(a.line2, 120), postcode: str(a.postcode, 10).toUpperCase(), city: str(a.city, 60), country: str(a.country, 30) || 'France' };
+    if (out.line1.length < 4) bad('Enter your street address so we can send you gifts.');
+    if (!/^[A-Z0-9][A-Z0-9 -]{2,9}$/.test(out.postcode)) bad('Enter a valid postcode.');
+    if (out.city.length < 2) bad('Enter your city.');
+    if (!COUNTRIES.includes(out.country)) bad('We ship to France, Belgium, Switzerland, Luxembourg and Monaco.');
+    return out;
+  }
+  const addressOf = (u) => { try { return u.address ? JSON.parse(u.address) : null; } catch { return null; } };
 
   /* ---------- App ---------- */
   const app = express();
@@ -191,6 +204,7 @@ function createApp(opts = {}) {
     if (!email) bad('Enter a valid email address.');
     if (!phone) bad('Enter a valid mobile number, for example 06 12 34 56 78.');
     if (!SMS_PREFIXES.some((pre) => phone.startsWith(pre))) bad('For now we can only send codes to mobile numbers in France, Belgium, Switzerland, Luxembourg and Monaco.');
+    const address = cleanAddress(b.address);
     if (b.consent !== true) bad('Please accept the terms and privacy policy to continue.');
     if (!allow('send:' + phone, 5, 60 * 60 * 1000) || !allow('send:' + email, 5, 60 * 60 * 1000)) bad('Too many codes requested. Try again in an hour.', 429);
     let referredBy = null;
@@ -214,8 +228,8 @@ function createApp(opts = {}) {
       saveState(u.id, s);
     }));
     const state = Engine.newState({ first, last, email, phone, referredBy }, now());
-    const info = db.prepare('INSERT INTO users (first, last, email, phone, verified, referred_by, state, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)')
-      .run(first, last, email, phone, referredBy, JSON.stringify(state), Date.now());
+    const info = db.prepare('INSERT INTO users (first, last, email, phone, verified, referred_by, state, address, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)')
+      .run(first, last, email, phone, referredBy, JSON.stringify(state), JSON.stringify(address), Date.now());
     const user = getUser(info.lastInsertRowid);
     const channel = channelOf(b.channel);
     const otp = await sendCode(user, 'signup', channel);
@@ -373,6 +387,78 @@ function createApp(opts = {}) {
     }
     res.json({ state: out.state, events: out.events.filter((e) => !e.type.startsWith('referral')), result: out.result });
   }));
+
+  api.put('/me/address', auth, json, (req, res) => {
+    const a = cleanAddress((req.body || {}).address);
+    db.prepare('UPDATE users SET address = ? WHERE id = ?').run(JSON.stringify(a), req.user.id);
+    // Product gifts waiting for an address, or not shipped yet, go to the new one.
+    db.prepare("UPDATE gifts SET address = ?, status = 'to_ship' WHERE user_id = ? AND kind = 'product' AND status IN ('needs_address', 'to_ship')").run(JSON.stringify(a), req.user.id);
+    res.json({ user: publicUser(getUser(req.user.id)) });
+  });
+
+  /* ---------- Contests & gifts ---------- */
+  const optionalUser = (req) => {
+    const t = sec.parseCookies(req.headers.cookie).sid;
+    const row = t && db.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(sec.sha256(t), Date.now());
+    const u = row && getUser(row.user_id);
+    return u && u.verified ? u : null;
+  };
+  const contestView = (c, userId) => ({
+    id: c.id, title: c.title, period: c.period, description: c.description, prizeKind: c.prize_kind, prizeLabel: c.prize_label, winners: c.winners,
+    startsAt: c.starts_at, endsAt: c.ends_at, status: c.status,
+    entries: db.prepare('SELECT COUNT(*) AS n FROM contest_entries WHERE contest_id = ?').get(c.id).n,
+    entered: !!(userId && db.prepare('SELECT 1 FROM contest_entries WHERE contest_id = ? AND user_id = ?').get(c.id, userId)),
+    won: !!(userId && c.winner_ids && JSON.parse(c.winner_ids).includes(userId)),
+    winnerNames: c.winner_ids ? JSON.parse(c.winner_ids).map((id) => { const w = getUser(id); return w ? `${w.first} ${(w.last || '')[0] || ''}.`.replace(/ \.$/, '') : 'A member'; }) : [],
+  });
+  api.get('/contests', (req, res) => {
+    const u = optionalUser(req);
+    const rows = db.prepare("SELECT * FROM contests WHERE status = 'open' OR (status = 'drawn' AND ends_at > ?) ORDER BY ends_at ASC").all(Date.now() - 30 * 864e5);
+    res.json({ contests: rows.map((c) => contestView(c, u && u.id)) });
+  });
+  api.post('/contests/:id/enter', auth, (req, res) => {
+    const c = db.prepare('SELECT * FROM contests WHERE id = ?').get(Number(req.params.id));
+    if (!c || c.status !== 'open' || c.ends_at < Date.now() || c.starts_at > Date.now()) bad('This contest is closed.', 422);
+    if (!addressOf(req.user)) bad('Add your postal address in your profile first, so we can send you the prize.', 422);
+    db.prepare('INSERT OR IGNORE INTO contest_entries (contest_id, user_id, created_at) VALUES (?, ?, ?)').run(c.id, req.user.id, Date.now());
+    res.json({ contest: contestView(c, req.user.id) });
+  });
+  const giftView = (g, state) => {
+    let status = g.status;
+    if (g.kind === 'soin' && g.code) { const v = state.vouchers.find((x) => x.code === g.code); if (v && v.used) status = 'used'; else if (v && v.expires < Date.now()) status = 'expired'; }
+    return { id: g.id, kind: g.kind, label: g.label, source: g.source, note: g.note, status, code: g.code, address: g.address ? JSON.parse(g.address) : null, createdAt: g.created_at, shippedAt: g.shipped_at };
+  };
+  api.get('/me/gifts', auth, (req, res) => {
+    const st = stateOf(req.user);
+    res.json({ gifts: db.prepare('SELECT * FROM gifts WHERE user_id = ? ORDER BY id DESC').all(req.user.id).map((g) => giftView(g, st)) });
+  });
+  /* Give a soin (free-treatment voucher, usable when booking) or a product (shipped to the saved address). */
+  function giveGift(userId, { kind, ref, source, note }) {
+    let gift;
+    db.tx(() => {
+      const u = getUser(userId) || bad('Customer not found.', 404);
+      let label, code = null;
+      if (kind === 'soin') {
+        const sv = Engine.SERVICES.find((x) => x.id === ref) || bad('Choose a treatment.');
+        label = `${sv.name} · ${sv.mins} min`;
+        code = 'GIFT-' + Array.from(crypto.randomBytes(6), (b) => REF_ALPHABET[b % REF_ALPHABET.length]).join('');
+        const s = stateOf(u);
+        s.vouchers.unshift({ id: `gift-${sv.id}`, season: Engine.seasonOf(now()).id, kind: 'service', title: `Gift · Free ${sv.name}`, note: source, cost: 0, value: 100, type: 'percent', code, used: false, expires: Date.now() + 180 * 864e5, gift: true });
+        saveState(u.id, s);
+      } else if (kind === 'product') {
+        const p = products(true).find((x) => x.id === ref) || bad('Choose a product.');
+        label = p.name;
+      } else bad('Choose a treatment or a product.');
+      const address = kind === 'product' ? addressOf(u) : null;
+      const info = db.prepare('INSERT INTO gifts (user_id, kind, ref, label, source, note, status, code, address, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(u.id, kind, ref, label, source, note ? String(note).slice(0, 300) : null, kind === 'soin' ? 'available' : (address ? 'to_ship' : 'needs_address'), code, address ? JSON.stringify(address) : null, Date.now());
+      gift = { id: info.lastInsertRowid, user: u, label, kind, code };
+    });
+    const u = gift.user;
+    notifier.push([u.id], { title: 'A gift from Seasonly 🎁', body: `${gift.label} is waiting for you in your profile.`, url: '/#gifts' }).catch(() => {});
+    mailTo(u, `A gift for you: ${gift.label}`, `Bonjour ${u.first},\n\n${source}: ${gift.label} is yours.\n\n${gift.kind === 'soin' ? `Book it in the app: your free-treatment voucher ${gift.code} is applied at the confirm step. It's valid for 6 months.` : 'We will ship it to the address saved in your profile. Check it is up to date.'}`);
+    return gift;
+  }
 
   /* Support messages, feedback and feature ideas. */
   const TOPICS = ['Booking', 'Order', 'Account', 'Skin Miles', 'Other'];
@@ -553,7 +639,7 @@ function createApp(opts = {}) {
     res.json({ users: rows.map((u) => { const s = stateOf(u); return {
       id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, verified: !!u.verified, referralCode: u.referral_code, referredBy: u.referred_by,
       miles: s.miles, lifetime: s.lifetime, tier: Engine.tierOf(s.lifetime).name, streak: s.streak, bookings: s.bookings.length, orders: s.orders.length,
-      friends: s.referral.friends, createdAt: u.created_at, lastLogin: u.last_login,
+      friends: s.referral.friends, createdAt: u.created_at, lastLogin: u.last_login, address: addressOf(u),
       push: !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ?').get(u.id) }; }) });
   });
   admin.post('/users/:id/miles', json, (req, res) => {
@@ -589,6 +675,69 @@ function createApp(opts = {}) {
     }
     res.json({ item: it });
   });
+  /* Contests */
+  const PERIODS = { week: 'Contest of the week', month: 'Contest of the month', year: 'Contest of the year' };
+  function periodEnd(period, from = new Date()) {
+    if (period === 'week') { const d = Engine.addDays(Engine.mondayOf(from), 7); return d.getTime() - 1; }
+    if (period === 'month') return new Date(from.getFullYear(), from.getMonth() + 1, 1).getTime() - 1;
+    return new Date(from.getFullYear() + 1, 0, 1).getTime() - 1;
+  }
+  admin.get('/contests', (req, res) => {
+    res.json({ contests: db.prepare('SELECT * FROM contests ORDER BY id DESC LIMIT 100').all().map((c) => ({ ...contestView(c, null), winnerIds: c.winner_ids ? JSON.parse(c.winner_ids) : [] })), periods: PERIODS,
+      services: Engine.SERVICES.map((s) => ({ id: s.id, name: `${s.name} · ${s.mins} min` })), products: products(true).map((p) => ({ id: p.id, name: p.name })) });
+  });
+  admin.post('/contests', json, (req, res) => {
+    const b = req.body || {};
+    const period = PERIODS[b.period] ? b.period : bad('Choose week, month or year.');
+    const kind = b.prizeKind === 'product' ? 'product' : 'soin';
+    const ref = String(b.prizeRef || '');
+    const label = kind === 'soin' ? ((Engine.SERVICES.find((x) => x.id === ref) || bad('Choose a treatment.')).name) : ((products(true).find((x) => x.id === ref) || bad('Choose a product.')).name);
+    const title = String(b.title || '').trim().slice(0, 80) || `Win a ${label}`;
+    const winners = Math.min(20, Math.max(1, Math.round(Number(b.winners) || 1)));
+    const endsAt = b.endsAt ? new Date(b.endsAt).getTime() : periodEnd(period);
+    if (!(endsAt > Date.now())) bad('The end date must be in the future.');
+    const info = db.prepare("INSERT INTO contests (title, period, description, prize_kind, prize_ref, prize_label, winners, starts_at, ends_at, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)")
+      .run(title, period, String(b.description || '').trim().slice(0, 600), kind, ref, label, winners, Date.now(), endsAt, Date.now());
+    if (b.announce) notifier.push('all', { title: `New ${PERIODS[period].toLowerCase()} 🎁`, body: `${title}. Enter in the Rewards tab.`, url: '/#contests' }).catch(() => {});
+    res.status(201).json({ contest: contestView(db.prepare('SELECT * FROM contests WHERE id = ?').get(info.lastInsertRowid), null) });
+  });
+  admin.post('/contests/:id/draw', (req, res) => {
+    const c = db.prepare('SELECT * FROM contests WHERE id = ?').get(Number(req.params.id)) || bad('Contest not found.', 404);
+    if (c.status !== 'open') bad('A winner was already drawn for this contest.');
+    const entrants = db.prepare('SELECT user_id FROM contest_entries WHERE contest_id = ?').all(c.id).map((r) => r.user_id).filter((id) => { const u = getUser(id); return u && u.verified; });
+    if (!entrants.length) bad('Nobody entered this contest yet.');
+    // Fair draw with a cryptographic random generator.
+    const pool = [...entrants], winners = [];
+    while (winners.length < Math.min(c.winners, pool.length)) winners.push(pool.splice(crypto.randomInt(pool.length), 1)[0]);
+    db.prepare("UPDATE contests SET status = 'drawn', winner_ids = ? WHERE id = ?").run(JSON.stringify(winners), c.id);
+    winners.forEach((id) => giveGift(id, { kind: c.prize_kind, ref: c.prize_ref, source: `You won "${c.title}"` }));
+    res.json({ contest: contestView(db.prepare('SELECT * FROM contests WHERE id = ?').get(c.id), null), winners: winners.map((id) => { const u = getUser(id); return { id, name: `${u.first} ${u.last}`.trim(), email: u.email }; }) });
+  });
+  admin.post('/contests/:id/close', (req, res) => {
+    db.prepare("UPDATE contests SET status = 'closed' WHERE id = ? AND status = 'open'").run(Number(req.params.id));
+    res.json({ ok: true });
+  });
+
+  /* Gifts */
+  admin.get('/gifts', (req, res) => {
+    res.json({ gifts: db.prepare('SELECT g.*, u.first, u.last, u.email, u.phone, u.state FROM gifts g LEFT JOIN users u ON u.id = g.user_id ORDER BY g.id DESC LIMIT 300').all()
+      .map((g) => ({ ...giftView(g, g.state ? JSON.parse(g.state) : { vouchers: [] }), customer: `${g.first || ''} ${g.last || ''}`.trim(), email: g.email, phone: g.phone, userId: g.user_id })) });
+  });
+  admin.post('/gifts', json, (req, res) => {
+    const b = req.body || {};
+    const u = db.prepare('SELECT * FROM users WHERE (email = ? OR id = ?) AND verified = 1').get(String(b.to || '').trim().toLowerCase(), Number(b.to) || -1) || bad('No confirmed customer with that email.');
+    const g = giveGift(u.id, { kind: b.kind, ref: b.ref, source: String(b.reason || 'A gift from the Seasonly team').trim().slice(0, 80), note: b.note });
+    res.status(201).json({ gift: { id: g.id, label: g.label } });
+  });
+  admin.post('/gifts/:id/shipped', (req, res) => {
+    const g = db.prepare('SELECT * FROM gifts WHERE id = ?').get(Number(req.params.id)) || bad('Gift not found.', 404);
+    if (g.kind !== 'product' || g.status !== 'to_ship') bad('Only product gifts waiting to ship can be marked as shipped.');
+    db.prepare("UPDATE gifts SET status = 'shipped', shipped_at = ? WHERE id = ?").run(Date.now(), g.id);
+    const u = getUser(g.user_id);
+    if (u) { notifier.push([u.id], { title: 'Your gift is on its way', body: `${g.label} has been shipped.`, url: '/#gifts' }).catch(() => {}); mailTo(u, 'Your gift is on its way', `Bonjour ${u.first},\n\n${g.label} has been shipped to:\n${JSON.parse(g.address).line1}, ${JSON.parse(g.address).postcode} ${JSON.parse(g.address).city}`); }
+    res.json({ ok: true });
+  });
+
   admin.get('/messages', (req, res) => {
     const kind = ['support', 'feedback', 'idea'].includes(req.query.kind) ? req.query.kind : null;
     const rows = db.prepare(`SELECT m.*, u.first, u.last, u.email, u.phone FROM messages m LEFT JOIN users u ON u.id = m.user_id ${kind ? 'WHERE m.kind = ?' : ''} ORDER BY m.status = 'open' DESC, m.id DESC LIMIT 300`).all(...(kind ? [kind] : []));

@@ -25,6 +25,7 @@
     close: '<path d="M6 6l12 12M18 6 6 18"/>',
     share: '<path d="M12 15V3.5M8 7.5l4-4 4 4"/><path d="M5 12v7.5h14V12"/>',
     play: '<path d="M8 5.5v13l10.5-6.5L8 5.5Z" fill="currentColor"/>',
+    pin: '<path d="M12 21s-6.5-6-6.5-11a6.5 6.5 0 0 1 13 0c0 5-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/>',
     locate: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7"/>',
     book: '<path d="M3.5 5.5C6 4.5 9 4.5 12 6c3-1.5 6-1.5 8.5-.5v13c-2.5-1-5.5-1-8.5.5-3-1.5-6-1.5-8.5-.5v-13Z"/><path d="M12 6v13"/>',
     gift: '<rect x="3.5" y="8.5" width="17" height="4" rx="1"/><path d="M5 12.5V20h14v-7.5M12 8.5V20"/><path d="M12 8.5S10.5 4 8 4.5 7 8.5 12 8.5ZM12 8.5S13.5 4 16 4.5 17 8.5 12 8.5Z"/>',
@@ -126,6 +127,10 @@
       act: (type, payload) => call('POST', '/actions', { type, payload }),
       uploadAvatar: (blob) => call('POST', '/me/avatar', null, blob),
       deleteAvatar: () => call('DELETE', '/me/avatar'),
+      saveAddress: (address) => call('PUT', '/me/address', { address }),
+      contests: async () => (await call('GET', '/contests')).contests,
+      enterContest: async (id) => (await call('POST', `/contests/${id}/enter`)).contest,
+      gifts: async () => (await call('GET', '/me/gifts')).gifts,
       async avatar(user) {
         if (!user.hasAvatar) return null;
         if (avatarUrl && avatarUrl.v === user.avatarVersion) return avatarUrl.url;
@@ -152,7 +157,16 @@
     const normPhone = (raw) => { let p = String(raw || '').replace(/[\s.\-()]/g, ''); if (/^0[1-9]\d{8}$/.test(p)) p = '+33' + p.slice(1); return /^\+[1-9]\d{7,14}$/.test(p) ? p : null; };
     const normEmail = (raw) => { const e = String(raw || '').trim().toLowerCase(); return /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(e) ? e : null; };
     const pub = (u) => ({ id: u.id, first: u.state.profile.first, last: u.state.profile.last, email: u.email, phone: u.phone, referralCode: u.code,
+      emailVerified: true, phoneVerified: true, address: u.address || null,
       hasAvatar: !!u.avatar, avatarVersion: u.avatar ? String(u.avatar.length) : null, state: u.state, push: false });
+    const checkAddress = (a) => {
+      a = a || {};
+      const out = { line1: String(a.line1 || '').trim(), line2: String(a.line2 || '').trim(), postcode: String(a.postcode || '').trim().toUpperCase(), city: String(a.city || '').trim(), country: a.country || 'France' };
+      if (out.line1.length < 4) throw new Error('Enter your street address so we can send you gifts.');
+      if (!/^[A-Z0-9][A-Z0-9 -]{2,9}$/.test(out.postcode)) throw new Error('Enter a valid postcode.');
+      if (out.city.length < 2) throw new Error('Enter your city.');
+      return out;
+    };
     const ctx = () => ({ now: new Date(), products: C.PRODUCTS, settings: { referral: E.DEFAULT_REFERRAL } });
     const findBy = (f) => Object.values(db.users).find(f);
     function newCode(userId, purpose, channel) {
@@ -175,6 +189,8 @@
         if (!first) return err('Enter your first name.');
         if (!email) return err('Enter a valid email address.');
         if (!phone) return err('Enter a valid mobile number, for example 06 12 34 56 78.');
+        let address;
+        try { address = checkAddress(d.address); } catch (e) { return err(e.message); }
         if (d.consent !== true) return err('Please accept the terms and privacy policy to continue.');
         let referredBy = null;
         if (d.referral) {
@@ -187,7 +203,7 @@
         if (findBy((u) => u.verified && (u.email === email || u.phone === phone))) return err('An account already exists with this email or phone number. Sign in instead.');
         Object.keys(db.users).forEach((k) => { const u = db.users[k]; if (!u.verified && (u.email === email || u.phone === phone)) delete db.users[k]; });
         const id = 'u' + Date.now().toString(36);
-        db.users[id] = { id, email, phone, verified: false, code: null, avatar: null, state: E.newState({ first, last: String(d.last || '').trim(), email, phone, referredBy }, new Date()) };
+        db.users[id] = { id, email, phone, address, verified: false, code: null, avatar: null, state: E.newState({ first, last: String(d.last || '').trim(), email, phone, referredBy }, new Date()) };
         const channel = ['sms', 'email', 'both'].includes(d.channel) ? d.channel : 'sms';
         return resp(db.users[id], newCode(id, 'signup', channel), channel);
       },
@@ -252,6 +268,15 @@
         return { user: pub(u) };
       },
       async deleteAvatar() { const u = db.users[db.session]; u.avatar = null; save(); return { user: pub(u) }; },
+      async saveAddress(a) { const u = db.users[db.session]; u.address = checkAddress(a); save(); return { user: pub(u) }; },
+      // Demo: one sample contest so testers can see how contests look. Draws happen in the admin panel of the real server.
+      async contests() {
+        const u = db.users[db.session] || {};
+        const end = E.addDays(E.mondayOf(new Date()), 7).getTime() - 1;
+        return [{ id: 1, title: 'Win a Soin Signature', period: 'week', description: 'Enter for a chance to win a 30-minute Soin Signature at the Face Glow Bar of your choice.', prizeKind: 'soin', prizeLabel: 'Soin Signature', winners: 1, endsAt: end, status: 'open', entries: 128 + (u.entered1 ? 1 : 0), entered: !!u.entered1, won: false, winnerNames: [] }];
+      },
+      async enterContest() { const u = db.users[db.session]; if (!u.address) return err('Add your postal address in your profile first, so we can send you the prize.'); u.entered1 = true; save(); return (await this.contests())[0]; },
+      async gifts() { return []; },
       async avatar() { const u = db.users[db.session]; return u && u.avatar; },
     };
   }
@@ -335,6 +360,8 @@
       tabbar.innerHTML = [['home', 'home', 'Home'], ['shop', 'bag', 'Shop'], ['book', 'calendar', 'Book'], ['rewards', 'heart', 'Rewards'], ['profile', 'user', 'Profile']]
         .map(([id, icon, label]) => `<button class="tab${ui.tab === id ? ' on' : ''}" data-a="tab" data-arg="${id}" aria-label="${label}">${ic(icon, 22)}<span>${label}</span>${id === 'rewards' && E.canCheckIn(S, today()) ? '<i class="dot"></i>' : ''}</button>`).join('');
     }
+    if (U && ui.tab === 'rewards' && !ui.keepScroll) loadContests();
+    if (U && ui.tab === 'profile' && !ui.keepScroll) loadGifts();
     if (ui.keepScroll) app.scrollTop = scroll;
     ui.keepScroll = false;
     paintAvatars();
@@ -379,6 +406,9 @@
       <p class="p-price"><span>${eur(p.price)}${p.compareAt ? ` <s class="muted">${eur(p.compareAt)}</s>` : ''}</span><span class="muted">${esc(p.size)}</span></p>
     </article>`;
   }
+  const COUNTRIES = ['France', 'Belgique', 'Suisse', 'Luxembourg', 'Monaco'];
+  const countrySelect = (id, value) => `<label class="field" for="${id}"><span>Country</span><select id="${id}" name="${id}" autocomplete="country-name">${COUNTRIES.map((c) => `<option ${c === (value || 'France') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>`;
+  const addrText = (a) => (a ? [a.line1, a.line2, `${a.postcode} ${a.city}`, a.country].filter(Boolean).map(esc).join('<br>') : '');
   const field = (id, label, attrs = '', value = '') => `<label class="field" for="${id}"><span>${label}</span><input id="${id}" name="${id}" value="${esc(value)}" ${attrs}></label>`;
 
   /* ---------- Auth screens ---------- */
@@ -410,6 +440,12 @@
           <div class="two">${field('first', 'First name', 'autocomplete="given-name" required maxlength="40"', f.first)}${field('last', 'Last name', 'autocomplete="family-name" maxlength="40"', f.last)}</div>
           ${field('email', 'Email', 'type="email" autocomplete="email" inputmode="email" required', f.email)}
           ${field('phone', 'Mobile number', 'type="tel" autocomplete="tel" inputmode="tel" placeholder="06 12 34 56 78" required', f.phone)}
+          <fieldset class="addr"><legend>Postal address <small>· so we can send you gifts and prizes</small></legend>
+            ${field('line1', 'Street and number', 'autocomplete="address-line1" required maxlength="120"', (f.address || {}).line1)}
+            ${field('line2', 'Apartment, floor (optional)', 'autocomplete="address-line2" maxlength="120"', (f.address || {}).line2)}
+            <div class="two">${field('postcode', 'Postcode', 'autocomplete="postal-code" inputmode="numeric" required maxlength="10"', (f.address || {}).postcode)}${field('city', 'City', 'autocomplete="address-level2" required maxlength="60"', (f.address || {}).city)}</div>
+            ${countrySelect('country', (f.address || {}).country)}
+          </fieldset>
           ${field('referral', 'Referral code (optional)', 'autocomplete="off" autocapitalize="characters" maxlength="12"', f.referral)}
           <fieldset class="seg"><legend>Send my confirmation code by</legend>
             ${[['sms', 'SMS'], ['email', 'Email'], ['both', 'Both']].map(([v, l]) => `<label class="${ch === v ? 'on' : ''}"><input type="radio" name="channel" value="${v}" ${ch === v ? 'checked' : ''}>${l}</label>`).join('')}
@@ -633,6 +669,10 @@
             <span class="game-ic">${ic(icon, 22)}</span><b>${name}</b><small class="muted">${sub}</small>
             <span class="${done ? 'pill-done' : 'pill-accent'}">${done ? `${ic('check', 12, 2.4)} Done today` : `+${rew}`}</span></button>`;
         }).join('')}</div>
+        <div class="anchor" id="contests"></div>
+        ${sectionHead('Contests')}
+        <div id="contestList">${contestList()}</div>
+        <div class="anchor" id="invite"></div>
         ${referralCard()}
         ${sectionHead('Challenges')}
         <div class="card stack-tight">${E.challengeList(S, today()).map((c) => {
@@ -641,6 +681,7 @@
             ${claimed ? `<span class="pill-done">${ic('check', 12, 2.4)} Claimed</span>` : full ? `<button class="btn-dark xs" data-a="claim" data-arg="${c.key}">Claim +${c.rew}</button>` : `<span class="sm muted">${c.v}/${c.max} · ${c.rew} mi</span>`}</div>
             <div class="bar"><i style="width:${(c.v / c.max) * 100}%"></i></div></div>`;
         }).join('')}</div>
+        <div class="anchor" id="vouchers"></div>
         ${sectionHead(`${s.name} vouchers`)}
         <p class="muted sm mb12">Trade your miles for seasonal products and Face Glow Bar treatments. Valid until ${fmtDate(s.end)}.</p>
         <div class="stack">${seasonV.map((v) => voucherCard(v, true)).join('')}</div>
@@ -668,7 +709,12 @@
         <p class="privacy-note">${ic('shield', 16)} <span>Your photo is resized on your phone, its location data is removed, and it is stored encrypted. Only you can see it.</span></p>
         ${upcomingSection()}
         ${purchasesSection()}
-        ${referralCard()}
+        <div class="anchor" id="gifts"></div>
+        ${sectionHead('My gifts')}
+        <div id="giftList">${giftList()}</div>
+        ${sectionHead('Shipping address')}
+        <button class="card addr-card" data-a="address">${ic('pin', 18)}<span class="grow">${U.address ? addrText(U.address) : '<b>Add your address</b><small class="muted block">Needed to receive gifts and contest prizes</small>'}</span><span class="link">${U.address ? 'Edit' : 'Add'}</span></button>
+        ${referralTeaser()}
         ${sectionHead('Help & ideas')}
         <div class="card settings">
           <button class="set-row" data-a="support"><span>${ic('mail', 18)} <span><b>Contact support</b><small class="muted block">A question about a booking, an order or your account</small></span></span>${ic('chevron', 16)}</button>
@@ -822,11 +868,47 @@
       </form></div>`;
   }
 
+  /* ---------- Contests & gifts ---------- */
+  let CONTESTS = null, GIFTS = null;
+  const PERIOD_LABEL = { week: 'Contest of the week', month: 'Contest of the month', year: 'Contest of the year' };
+  const daysLeft = (t) => { const d = Math.ceil((t - Date.now()) / 864e5); return d <= 0 ? 'Ends today' : d === 1 ? 'Ends tomorrow' : `${d} days left`; };
+  function contestList() {
+    if (!CONTESTS) return '<p class="muted sm">Loading contests…</p>';
+    if (!CONTESTS.length) return '<div class="card empty-row">' + ic('gift', 18) + ' <span>No contest running right now. New ones are announced by notification.</span></div>';
+    return `<div class="stack">${CONTESTS.map((c) => `<article class="contest card">
+      <div class="row between g8"><span class="st-pill soft">${esc(PERIOD_LABEL[c.period] || 'Contest')}</span><small class="muted">${c.status === 'open' ? daysLeft(c.endsAt) : 'Winner drawn'}</small></div>
+      <h3 class="serif-t">${esc(c.title)}</h3>
+      ${c.description ? `<p class="muted sm">${esc(c.description)}</p>` : ''}
+      <div class="row between g8 mt8"><span class="prize">${ic(c.prizeKind === 'soin' ? 'calendar' : 'gift', 16)} ${esc(c.prizeLabel)}${c.winners > 1 ? ` · ${c.winners} winners` : ''}</span><small class="muted">${nf(c.entries)} entered</small></div>
+      ${c.status === 'open' ? (c.entered ? `<p class="entered">${ic('check', 14, 2.4)} You're in. Good luck!</p>` : `<button class="btn-dark wide mt12" data-a="enter-contest" data-arg="${c.id}">Enter the contest</button>`)
+        : c.won ? `<p class="entered won">${ic('trophy', 14)} You won! Your prize is in My gifts.</p>` : `<p class="muted sm mt8">Winner: ${esc(c.winnerNames.join(', '))}</p>`}
+    </article>`).join('')}</div>`;
+  }
+  const GIFT_STATUS = { available: ['ok', 'Ready to book'], used: ['grey', 'Used'], expired: ['grey', 'Expired'], to_ship: ['soft', 'Preparing shipment'], shipped: ['ok', 'Shipped'], needs_address: ['soft', 'Add your address'] };
+  function giftList() {
+    if (!GIFTS) return '<p class="muted sm">Loading…</p>';
+    if (!GIFTS.length) return `<button class="card empty-row" data-a="goto" data-arg="rewards:contests">${ic('gift', 18)} <span>No gift yet. <b>Enter this week's contest</b></span></button>`;
+    return `<div class="stack">${GIFTS.map((g) => { const [c, l] = GIFT_STATUS[g.status] || ['grey', g.status]; return `<div class="card gift">
+      <span class="item-ic">${ic(g.kind === 'soin' ? 'calendar' : 'gift', 20)}</span>
+      <span class="grow"><b class="block">${esc(g.label)}</b><small class="muted block">${esc(g.source)}</small>
+        ${g.kind === 'soin' && g.status === 'available' ? `<small class="block mt4">Free treatment voucher <span class="code">${esc(g.code)}</span></small>` : ''}
+        ${g.kind === 'product' && g.address ? `<small class="muted block mt4">To ${esc(g.address.line1)}, ${esc(g.address.postcode)} ${esc(g.address.city)}</small>` : ''}</span>
+      <span class="item-side"><span class="st-pill ${c}">${l}</span>${g.kind === 'soin' && g.status === 'available' ? `<button class="btn-dark xs" data-a="use-service">Book</button>` : ''}</span></div>`; }).join('')}</div>`;
+  }
+  async function loadContests() {
+    try { CONTESTS = await B.contests(); } catch { CONTESTS = []; }
+    const el = $('#contestList'); if (el) el.innerHTML = contestList();
+  }
+  async function loadGifts() {
+    try { GIFTS = await B.gifts(); } catch { GIFTS = []; }
+    const el = $('#giftList'); if (el) el.innerHTML = giftList();
+  }
+
   /* ---------- Referral ---------- */
   const refRules = () => CONFIG.referral || E.DEFAULT_REFERRAL;
   function referralTeaser() {
     const r = refRules();
-    return `<button class="ref-teaser" data-a="tab" data-arg="rewards">${ic('users', 20)}
+    return `<button class="ref-teaser" data-a="goto" data-arg="rewards:invite">${ic('users', 20)}
       <span><b>Invite a friend, get up to ${r.cap}% off</b><small>${r.perFriend}% off your next treatment for each friend who comes in</small></span>${ic('chevron', 16)}</button>`;
   }
   function refBanner() {
@@ -1257,7 +1339,44 @@
     try { await navigator.clipboard.writeText(text); toast('Copied', text.length > 40 ? 'Paste it in a message to your friend' : text, 'bag'); }
     catch { openSheet(`<div class="sheet-pad"><p class="eyebrow accent">Copy your code</p><p class="muted">Select the text below and copy it.</p><textarea class="copy-box" readonly>${esc(text)}</textarea><button class="btn-dark wide mt16" data-a="close">Done</button></div>`); setTimeout(() => { const t = $('.copy-box'); if (t) t.select(); }, 350); }
   }
+  // Jump to a section of a tab (e.g. Rewards → Invite friends) and briefly highlight it.
+  function goTo(tab, anchor) {
+    if (sheet.classList.contains('open')) closeSheet();
+    ui.tab = tab; render();
+    requestAnimationFrame(() => {
+      const el = document.getElementById(anchor);
+      if (!el) { app.scrollTop = 0; return; }
+      el.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      const target = el.nextElementSibling || el;
+      target.classList.add('flash'); setTimeout(() => target.classList.remove('flash'), 1600);
+    });
+  }
   const A = {
+    goto(arg) { const [tab, anchor] = arg.split(':'); goTo(tab, anchor); },
+    async 'enter-contest'(arg, el) {
+      el.disabled = true;
+      try {
+        const c = await B.enterContest(Number(arg));
+        CONTESTS = CONTESTS.map((x) => (x.id === c.id ? c : x));
+        const l = $('#contestList'); if (l) l.innerHTML = contestList();
+        toast("You're in the draw", 'Good luck! Winners are notified here and by email.', 'tier');
+      } catch (e) {
+        el.disabled = false;
+        toast(e.message, '', 'error');
+        if (!U.address) A.address();
+      }
+    },
+    address() {
+      const a = U.address || {};
+      openSheet(`<div class="sheet-pad"><p class="eyebrow accent">Shipping address</p><h2 class="serif-h sm">Where should we <em class="accent">send</em> your gifts?</h2>
+        <form class="stack" data-form="address">
+          ${field('aLine1', 'Street and number', 'autocomplete="address-line1" required maxlength="120"', a.line1)}
+          ${field('aLine2', 'Apartment, floor (optional)', 'autocomplete="address-line2" maxlength="120"', a.line2)}
+          <div class="two">${field('aPostcode', 'Postcode', 'autocomplete="postal-code" required maxlength="10"', a.postcode)}${field('aCity', 'City', 'autocomplete="address-level2" required maxlength="60"', a.city)}</div>
+          ${countrySelect('aCountry', a.country)}
+          <button class="btn-dark wide" type="submit">Save my address</button>
+        </form><button class="btn-ghost wide mt8" data-a="close">Cancel</button></div>`);
+    },
     tab(arg) { if (sheet.classList.contains('open')) closeSheet(); ui.tab = arg; render(); app.scrollTop = 0; },
     auth(arg) { ui.auth = arg; ui.error = ''; render(); app.scrollTop = 0; },
     async resend(arg) {
@@ -1270,7 +1389,7 @@
     },
     bag() { openSheet(bagView); },
     'go-shop'() { closeSheet(); A.tab('shop'); },
-    'go-rewards'() { closeSheet(); A.tab('rewards'); },
+    'go-rewards'() { goTo('rewards', 'vouchers'); },
     'use-service'() { closeSheet(); ui.step = 1; A.tab('book'); },
     close: closeSheet,
     cat(arg) { ui.cat = arg; rerender(); },
@@ -1396,7 +1515,8 @@
   /* ---------- Forms ---------- */
   const FORMS = {
     async signup(f) {
-      const d = { first: f.first.value, last: f.last.value, email: f.email.value, phone: f.phone.value, referral: f.referral.value.trim(), channel: f.channel.value, consent: f.consent.checked };
+      const d = { first: f.first.value, last: f.last.value, email: f.email.value, phone: f.phone.value, referral: f.referral.value.trim(), channel: f.channel.value, consent: f.consent.checked,
+        address: { line1: f.line1.value, line2: f.line2.value, postcode: f.postcode.value, city: f.city.value, country: f.country.value } };
       ui.form = d;
       const out = await B.signup(d);
       ui.pending = { ...out, purpose: 'signup', at: Date.now() };
@@ -1429,6 +1549,12 @@
         <p class="muted">Every message is read by the Seasonly team.</p>
         <button class="btn-dark wide mt16" data-a="close">Done</button></div>`);
     },
+    async address(f) {
+      const out = await B.saveAddress({ line1: f.aLine1.value, line2: f.aLine2.value, postcode: f.aPostcode.value, city: f.aCity.value, country: f.aCountry.value });
+      U.address = out.user.address;
+      toast('Address saved', '', 'bag');
+      closeSheet();
+    },
     async rename(f) {
       await act('profile', { first: f.nameFirst.value, last: f.nameLast.value }, { quiet: true });
       U.first = S.profile.first; U.last = S.profile.last;
@@ -1448,7 +1574,7 @@
     e.preventDefault();
     if (ui.busy) return;
     ui.busy = true; ui.error = '';
-    const authForm = !['rename', 'support', 'feedback'].includes(name);
+    const authForm = !['rename', 'support', 'feedback', 'address'].includes(name);
     if (authForm) render();
     try { await FORMS[name](e.target.closest('form') || e.target); }
     catch (err) { ui.error = err.message; if (!authForm) toast(err.message, '', 'error'); }
@@ -1481,7 +1607,10 @@
     if (m) { ui.tab = 'profile'; render(); A.booking(m[1]); }
     else if (h === '#support') { ui.tab = 'profile'; render(); A.support(); }
     else if (h === '#profile') { ui.tab = 'profile'; render(); }
-    if (m || h === '#support' || h === '#profile') history.replaceState(null, '', location.pathname);
+    else if (h === '#gifts') goTo('profile', 'gifts');
+    else if (h === '#contests') goTo('rewards', 'contests');
+    else if (h === '#invite') goTo('rewards', 'invite');
+    if (m || ['#support', '#profile', '#gifts', '#contests', '#invite'].includes(h)) history.replaceState(null, '', location.pathname);
   }
 
   /* ---------- Boot ---------- */

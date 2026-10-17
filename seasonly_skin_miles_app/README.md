@@ -108,10 +108,25 @@ The Face Glow Bar treatments (Gym, Glow, Winter, 15 min, €25) and the three Pa
 - **Sign-up codes by SMS:** only sent to mobile numbers in France, Belgium, Switzerland, Luxembourg and Monaco. Change the list with `SMS_COUNTRIES`, for example `+33,+32`.
 - **Sign-in:** a code is only sent to an email or phone the customer confirmed.
 
+## Contests and gifts
+
+- **Contests** (Admin → Contests): launch a contest of the week, month or year.
+  - The prize is a treatment or a product, with one or more winners.
+  - The contest ends with its period unless you set an end date, and can be announced by push.
+  - Customers enter from Rewards → Contests. A postal address is required to enter.
+  - **Draw winner** picks at random among the entrants (cryptographic random). The prize appears in the winner's Profile → My gifts, with a push notification and an email.
+- **Gifts** (Admin → Gifts): give any customer a treatment or a product without a contest.
+  - A treatment becomes a free-treatment voucher, valid 6 months, applied when booking.
+  - A product is listed **To ship** with the customer's address. **Mark as shipped** notifies the customer.
+  - If the customer changes address before shipping, the gift follows the new address.
+- **Address at sign-up:** street, postcode, city and country (France, Belgium, Switzerland, Luxembourg, Monaco) are required. They can be edited in Profile → Shipping address.
+
 ## Admin panel (`/admin`)
 
 | Section | What it does |
 |---|---|
+| Contests | Launch weekly, monthly or yearly contests and draw winners |
+| Gifts | Give treatments or products; track shipping |
 | Inbox | Support messages, feedback and feature ideas; reply by email, mark resolved |
 | Dashboard | Customers, bookings, orders, revenue, miles, referrals, push subscribers, and which delivery channels are connected |
 | Products | Add, edit, hide or delete products, with photo, price, "was" price, size, category, badge and results |
