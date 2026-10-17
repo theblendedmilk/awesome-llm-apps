@@ -508,3 +508,46 @@ s.muted { font-size: .85em; }
 .hero::before, .welcome-hero::after { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 42%; z-index: 0; pointer-events: none;
   background: linear-gradient(180deg, rgba(251,250,249,.62) 0%, rgba(251,250,249,0) 100%); }
 .hero-top, .hero-copy { z-index: 2; }
+
+/* ===================== v3: payments, bookings, support, miles animation ===================== */
+.field select, .field textarea { width: 100%; border: 1px solid var(--line); background: #fff; border-radius: 14px; padding: 13px 14px; font: inherit; font-size: 16px; color: var(--ink); outline: none; }
+.field textarea { resize: vertical; min-height: 110px; line-height: 1.45; }
+.field select:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(196,128,108,.18); }
+.st-pill { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.st-pill.ok { background: #EAF1EA; color: #4E7A55; }
+.st-pill.grey { background: #F1ECE8; color: var(--ink-2); }
+.st-pill.soft { background: var(--accent-soft); color: var(--accent-ink); }
+.item-row { display: flex; align-items: center; gap: 12px; padding: 14px; text-align: left; }
+.item-ic { width: 42px; height: 42px; border-radius: 14px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
+.item-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.item-row .serif-t { font-size: 19px; }
+.empty-row { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2); text-align: left; }
+.empty-row .i { color: var(--accent); flex: none; }
+a.route { text-decoration: none; gap: 8px; }
+.btn-ghost.wide.route { color: var(--ink); }
+.msg p { margin-top: 6px; }
+.msg .reply { background: var(--accent-soft); color: var(--ink); border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+.seg-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.seg-btns button { padding: 11px 0; border-radius: 999px; background: #fff; border: 1px solid var(--line); font-weight: 600; text-align: center; }
+.seg-btns button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.stars { display: flex; justify-content: center; gap: 6px; }
+.stars button { color: #D9CFC8; padding: 4px; }
+.stars button.on { color: var(--accent); }
+.stars button.on svg { fill: var(--accent); }
+
+/* Miles credited: glass pill rises, sparkles burst, counters count up. */
+.miles-burst { position: absolute; inset: 0; z-index: 70; pointer-events: none; display: grid; place-items: center; }
+.mb-pill { display: flex; align-items: center; gap: 8px; padding: 14px 22px; border-radius: 999px; color: var(--ink);
+  background: linear-gradient(135deg, rgba(255,255,255,.92), rgba(250,236,226,.85)); border: 1px solid var(--glass-border);
+  box-shadow: 0 18px 40px rgba(64,38,22,.18); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+  animation: mbPill 1.6s cubic-bezier(.2,.9,.3,1) forwards; }
+.mb-pill .i { color: var(--accent); fill: var(--accent); }
+.mb-pill b { font-family: var(--serif); font-size: 34px; font-weight: 500; line-height: 1; font-variant-numeric: lining-nums; }
+.mb-pill span { font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent-ink); }
+.miles-burst i { position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; margin: -3.5px; border-radius: 50%; background: var(--accent); opacity: 0;
+  animation: mbSpark .9s ease-out forwards; }
+.miles-burst i:nth-child(3n) { background: #E2A387; } .miles-burst i:nth-child(4n) { background: #D9C3B0; width: 5px; height: 5px; }
+@keyframes mbPill { 0% { transform: translateY(24px) scale(.6); opacity: 0; } 18% { transform: translateY(0) scale(1.06); opacity: 1; } 30% { transform: scale(1); } 75% { opacity: 1; transform: translateY(-6px); } 100% { opacity: 0; transform: translateY(-90px) scale(.8); } }
+@keyframes mbSpark { 0% { opacity: 0; transform: rotate(var(--a)) translateY(0); } 15% { opacity: 1; } 100% { opacity: 0; transform: rotate(var(--a)) translateY(calc(var(--d) * -1)); } }
+[data-miles].bump { display: inline-block; animation: bump .9s ease; color: var(--accent-ink); }
+@keyframes bump { 0% { transform: scale(1); } 30% { transform: scale(1.18); } 100% { transform: scale(1); } }

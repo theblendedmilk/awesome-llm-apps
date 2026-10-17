@@ -17,7 +17,9 @@ const OTP_TTL = 10 * 60 * 1000;
 const OTP_RESEND = 30 * 1000;
 const OTP_ATTEMPTS = 5;
 // Actions a signed-in user may run. Everything else (welcome bonus, referral credit, admin adjustments) is server-only.
-const USER_ACTIONS = new Set(['checkin', 'tip', 'ritualStep', 'ritualRestart', 'match', 'quiz', 'wheel', 'redeem', 'claim', 'checkout', 'book', 'profile', 'fav']);
+const USER_ACTIONS = new Set(['checkin', 'tip', 'ritualStep', 'ritualRestart', 'match', 'quiz', 'wheel', 'redeem', 'claim', 'checkout', 'book', 'cancel', 'profile', 'fav']);
+// Booking times are Paris times.
+if (!process.env.TZ) process.env.TZ = 'Europe/Paris';
 const REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
@@ -53,6 +55,8 @@ function createApp(opts = {}) {
   // Per-IP limits (codes sent per hour, code checks per 10 minutes). Raise them behind a shared NAT if needed.
   const SEND_PER_IP = Number(env.OTP_SEND_PER_IP) || 10;
   const VERIFY_PER_IP = Number(env.OTP_VERIFY_PER_IP) || 30;
+  // Codes are only texted to the countries Seasonly serves, so nobody can run up the SMS bill on premium numbers abroad.
+  const SMS_PREFIXES = String(env.SMS_COUNTRIES || '+33,+32,+41,+352,+377').split(',').map((x) => x.trim()).filter(Boolean);
 
   /* ---------- Seed ---------- */
   if (!db.prepare('SELECT COUNT(*) AS n FROM products').get().n) {
@@ -63,7 +67,8 @@ function createApp(opts = {}) {
   const adminEmail = (env.ADMIN_EMAIL || 'admin@seasonly.fr').toLowerCase();
   let adminHash = null;
   if (env.ADMIN_PASSWORD) adminHash = sec.hashPassword(env.ADMIN_PASSWORD);
-  else if (!production) { adminHash = sec.hashPassword('seasonly-admin'); log.warn?.('ADMIN_PASSWORD not set — using the development password "seasonly-admin".'); }
+  else if (env.NODE_ENV === 'development') { adminHash = sec.hashPassword('seasonly-admin'); log.warn?.('ADMIN_PASSWORD not set — using the development password "seasonly-admin".'); }
+  // Otherwise the admin panel stays closed until ADMIN_PASSWORD is set.
 
   /* ---------- Helpers ---------- */
   const products = (all = false) => db.prepare('SELECT data FROM products').all().map((r) => JSON.parse(r.data))
@@ -185,6 +190,7 @@ function createApp(opts = {}) {
     if (!first) bad('Enter your first name.');
     if (!email) bad('Enter a valid email address.');
     if (!phone) bad('Enter a valid mobile number, for example 06 12 34 56 78.');
+    if (!SMS_PREFIXES.some((pre) => phone.startsWith(pre))) bad('For now we can only send codes to mobile numbers in France, Belgium, Switzerland, Luxembourg and Monaco.');
     if (b.consent !== true) bad('Please accept the terms and privacy policy to continue.');
     if (!allow('send:' + phone, 5, 60 * 60 * 1000) || !allow('send:' + email, 5, 60 * 60 * 1000)) bad('Too many codes requested. Try again in an hour.', 429);
     let referredBy = null;
@@ -310,32 +316,92 @@ function createApp(opts = {}) {
   });
 
   /* Rewards: the server runs the shared engine on the stored state. */
+  /* Run one engine action for a user, inside a transaction, and apply its side effects on other
+     accounts (referral credit or reversal). Returns the engine output plus messages to send afterwards. */
+  function runAction(userId, type, payload) {
+    let out, user;
+    const after = [];
+    db.tx(() => {
+      user = getUser(userId) || bad('Customer not found.', 404);
+      try { out = Engine.apply(stateOf(user), { type, payload: payload || {} }, ctxFor()); }
+      catch (e) { if (e.rule) bad(e.message, 422); throw e; }
+      saveState(user.id, out.state);
+      out.events.forEach((e) => {
+        if (e.type !== 'referralQualified' && e.type !== 'referralRevoked') return;
+        const referrer = db.prepare('SELECT * FROM users WHERE referral_code = ? AND verified = 1').get(e.code);
+        if (!referrer) return;
+        // A referral only counts for a friend who proved a real phone number: email-only accounts are free to create.
+        if (e.type === 'referralQualified' && !user.phone_verified) return;
+        const r = Engine.apply(stateOf(referrer), { type: e.type === 'referralQualified' ? 'referralCredit' : 'referralRevoke', payload: { name: user.first } }, ctxFor());
+        saveState(referrer.id, r.state);
+        after.push({ kind: e.type, referrer, discount: r.state.referral.discount, friend: user.first });
+      });
+    });
+    after.forEach(({ kind, referrer, discount, friend }) => {
+      if (kind !== 'referralQualified') return;
+      notifier.push([referrer.id], { title: 'Your friend came to Seasonly 🎉', body: `${friend} enjoyed a Face Glow Bar treatment. You now have ${discount}% off your next booking.`, url: '/#book' }).catch(() => {});
+      mailTo(referrer, `${friend} came for a treatment — your reward is ready`, `Bonjour ${referrer.first},\n\n${friend} confirmed their Seasonly account and paid for a treatment with your code.\n\nYou now have ${discount}% off your next Face Glow Bar booking, plus 200 Skin Miles.`);
+    });
+    return { out, user: getUser(userId) };
+  }
+  // Emails only ever go to an address the customer confirmed.
+  const mailTo = (u, subject, text) => { if (u && u.email && u.email_verified) notifier.email(u.email, subject, text).catch(() => {}); };
+  const mapsLink = (addr) => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}&travelmode=transit`;
+  const fmtWhen = (b) => `${new Date(b.startAt).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} at ${b.slot}`;
+  const eurTxt = (n) => `€${Number(n).toFixed(2).replace('.00', '')}`;
+
   api.post('/actions', auth, json, wrap(async (req, res) => {
     if (!allow('act:' + req.user.id, 120, 60 * 1000)) bad('Slow down a little and try again.', 429);
     const type = String((req.body || {}).type || '');
     if (!USER_ACTIONS.has(type)) bad('Unknown action.');
-    let out;
-    const referrals = [];
-    db.tx(() => {
-      const user = getUser(req.user.id);
-      try { out = Engine.apply(stateOf(user), { type, payload: req.body.payload || {} }, ctxFor()); }
-      catch (e) { if (e.rule) bad(e.message, 422); throw e; }
-      saveState(user.id, out.state);
-      // A referred friend confirmed their account and booked: credit the referrer.
-      out.events.filter((e) => e.type === 'referralQualified').forEach((e) => {
-        const referrer = db.prepare('SELECT * FROM users WHERE referral_code = ? AND verified = 1').get(e.code);
-        if (!referrer) return;
-        const r = Engine.apply(stateOf(referrer), { type: 'referralCredit', payload: { name: user.first } }, ctxFor());
-        saveState(referrer.id, r.state);
-        referrals.push({ referrer, discount: r.state.referral.discount, friend: user.first });
-      });
-    });
-    referrals.forEach(({ referrer, discount, friend }) => {
-      notifier.push([referrer.id], { title: 'Your friend booked 🎉', body: `${friend} booked a Face Glow Bar treatment. You now have ${discount}% off your next booking.`, url: '/#book' }).catch(() => {});
-      if (referrer.email && referrer.email_verified) notifier.email(referrer.email, `${friend} just booked — your reward is ready`, `Bonjour ${referrer.first},\n\n${friend} confirmed their Seasonly account and booked a treatment with your code.\n\nYou now have ${discount}% off your next Face Glow Bar booking, plus 200 Skin Miles.`).catch(() => {});
-    });
-    res.json({ state: out.state, events: out.events.filter((e) => e.type !== 'referralQualified'), result: out.result });
+    const { out, user } = runAction(req.user.id, type, req.body.payload);
+    const r = out.result || {};
+    if (type === 'book' && r.booking) {
+      const b = r.booking;
+      mailTo(user, `Your ${b.service} is booked`, `Bonjour ${user.first},\n\nYour treatment is booked.\n\n${b.service} · ${b.mins} min\n${fmtWhen(b)}\n${b.studio}\n${b.addr}\n\nPrice: ${eurTxt(b.price)}, paid at the Face Glow Bar. You'll earn ${b.miles} Skin Miles once it's paid.\nReference: ${b.id}\n\nDirections: ${mapsLink(b.addr)}\n\nWe'll send you a reminder one hour before. Need to change something? Cancel from your profile in the app.`);
+    }
+    if (type === 'checkout' && r.order) {
+      const o = r.order;
+      mailTo(user, `We received your order ${o.id}`, `Bonjour ${user.first},\n\nThank you for your order.\n\n${o.lines.map((l) => `${l.qty} × ${l.name} — ${eurTxt(l.price * l.qty)}`).join('\n')}\nTotal: ${eurTxt(o.total)}\n\nYou'll earn ${o.miles} Skin Miles as soon as your payment is confirmed.`);
+    }
+    if (type === 'cancel' && r.item) {
+      const it = r.item, what = it.service ? `${it.service} on ${fmtWhen(it)}` : `order ${it.id}`;
+      if (it.status === 'refund_requested') {
+        notifier.email(env.SUPPORT_EMAIL || 'hello@seasonly.fr', `Refund requested: ${it.id}`, `${user.first} ${user.last} (${user.email || user.phone}) asked for a refund of ${what}. Process it in the admin panel.`).catch(() => {});
+        mailTo(user, 'We received your refund request', `Bonjour ${user.first},\n\nWe received your request to refund ${what}. Our team will process it shortly. The Skin Miles earned with it will be deducted once the refund is made.`);
+      } else mailTo(user, 'Your cancellation is confirmed', `Bonjour ${user.first},\n\n${what[0].toUpperCase() + what.slice(1)} is cancelled. Any voucher or referral discount you used is available again.`);
+    }
+    res.json({ state: out.state, events: out.events.filter((e) => !e.type.startsWith('referral')), result: out.result });
   }));
+
+  /* Support messages, feedback and feature ideas. */
+  const TOPICS = ['Booking', 'Order', 'Account', 'Skin Miles', 'Other'];
+  api.post('/support', auth, json, wrap(async (req, res) => {
+    if (!allow('msg:' + req.user.id, 10, 60 * 60 * 1000)) bad('You sent several messages already. We will answer soon.', 429);
+    const b = req.body || {};
+    const topic = TOPICS.includes(b.topic) ? b.topic : 'Other';
+    const body = String(b.message || '').trim().slice(0, 4000), ref = String(b.ref || '').trim().slice(0, 40);
+    if (body.length < 5) bad('Write a few words so we can help.');
+    const info = db.prepare("INSERT INTO messages (user_id, kind, topic, ref, body, status, created_at) VALUES (?, 'support', ?, ?, ?, 'open', ?)").run(req.user.id, topic, ref || null, body, Date.now());
+    const u = req.user;
+    notifier.email(env.SUPPORT_EMAIL || 'hello@seasonly.fr', `[Support #${info.lastInsertRowid}] ${topic}${ref ? ` · ${ref}` : ''}`, `From ${u.first} ${u.last} (${u.email || '—'} · ${u.phone || '—'})\n\n${body}`).catch(() => {});
+    mailTo(u, `We received your message (#${info.lastInsertRowid})`, `Bonjour ${u.first},\n\nThank you for contacting Seasonly. We usually answer within one working day. You'll find our reply in the app and in your inbox.\n\nYour message:\n${body}`);
+    res.status(201).json({ id: info.lastInsertRowid });
+  }));
+  api.post('/feedback', auth, json, wrap(async (req, res) => {
+    if (!allow('msg:' + req.user.id, 10, 60 * 60 * 1000)) bad('Thank you! You sent several messages already.', 429);
+    const b = req.body || {};
+    const kind = b.kind === 'idea' ? 'idea' : 'feedback';
+    const rating = b.rating === undefined || b.rating === null || b.rating === '' ? null : Math.round(Number(b.rating));
+    if (rating !== null && !(rating >= 1 && rating <= 5)) bad('Choose between 1 and 5 stars.');
+    const body = String(b.message || '').trim().slice(0, 4000);
+    if (body.length < 3) bad('Write a few words first.');
+    const info = db.prepare('INSERT INTO messages (user_id, kind, topic, rating, body, status, created_at) VALUES (?, ?, ?, ?, ?, \'open\', ?)').run(req.user.id, kind, kind === 'idea' ? 'Feature idea' : 'Feedback', rating, body, Date.now());
+    res.status(201).json({ id: info.lastInsertRowid });
+  }));
+  api.get('/me/messages', auth, (req, res) => {
+    res.json({ messages: db.prepare('SELECT id, kind, topic, ref, rating, body, status, reply, replied_at, created_at FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(req.user.id) });
+  });
 
   /* Profile photo: validated, stripped of metadata, encrypted at rest, only ever served to its owner. */
   api.post('/me/avatar', auth, raw, wrap(async (req, res) => {
@@ -409,8 +475,11 @@ function createApp(opts = {}) {
     res.json({
       users: verified.length, pending: users.length - verified.length,
       bookings: sum((s) => s.bookings.length), orders: sum((s) => s.orders.length),
-      revenue: Math.round(sum((s) => s.orders.reduce((a, o) => a + o.total, 0)) * 100) / 100,
+      revenue: Math.round(sum((s) => s.orders.filter((o) => o.status === 'paid').reduce((a, o) => a + o.total, 0)) * 100) / 100,
       milesIssued: sum((s) => s.lifetime), milesBalance: sum((s) => s.miles),
+      openMessages: db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status = 'open'").get().n,
+      refundRequests: sum((s) => [...s.orders, ...s.bookings].filter((x) => x.status === 'refund_requested').length),
+      awaitingPayment: sum((s) => [...s.orders, ...s.bookings].filter((x) => ['pending', 'booked'].includes(x.status)).length),
       vouchers: sum((s) => s.vouchers.length), referrals: sum((s) => s.referral.friends),
       pushSubscribers: db.prepare('SELECT COUNT(DISTINCT user_id) AS n FROM push_subs').get().n,
       products: products(true).length,
@@ -506,6 +575,41 @@ function createApp(opts = {}) {
     .flatMap((u) => JSON.parse(u.state)[key].map((x) => ({ ...x, customer: `${u.first} ${u.last}`.trim(), email: u.email, userId: u.id })))
     .sort((a, b) => b.t - a.t);
   admin.get('/bookings', (req, res) => res.json({ bookings: flat('bookings') }));
+  /* Payment confirmed or refund made: the engine credits or takes back the miles. */
+  admin.post('/:kind(orders|bookings)/:userId/:id/:op(pay|refund)', (req, res) => {
+    const kind = req.params.kind === 'orders' ? 'order' : 'booking';
+    const { out, user } = runAction(Number(req.params.userId), req.params.op, { kind, id: req.params.id });
+    const it = out.result.item, what = kind === 'order' ? `order ${it.id}` : `${it.service} on ${fmtWhen(it)}`;
+    if (req.params.op === 'pay') {
+      notifier.push([user.id], { title: `+${it.credited} Skin Miles`, body: `Thank you! Your ${kind === 'order' ? 'order' : 'treatment'} is paid and your miles are credited.`, url: '/#profile' }).catch(() => {});
+      mailTo(user, `Payment received — +${it.credited} Skin Miles`, `Bonjour ${user.first},\n\nWe received your payment for ${what} (${eurTxt(kind === 'order' ? it.total : it.price)}).\n\n${it.credited} Skin Miles are now in your account.`);
+    } else {
+      notifier.push([user.id], { title: 'Refund made', body: `Your refund for ${what} is done. ${it.credited} Skin Miles were deducted.`, url: '/#profile' }).catch(() => {});
+      mailTo(user, 'Your refund is done', `Bonjour ${user.first},\n\nWe refunded ${what} (${eurTxt(kind === 'order' ? it.total : it.price)}). The ${it.credited} Skin Miles earned with this payment were deducted from your balance.`);
+    }
+    res.json({ item: it });
+  });
+  admin.get('/messages', (req, res) => {
+    const kind = ['support', 'feedback', 'idea'].includes(req.query.kind) ? req.query.kind : null;
+    const rows = db.prepare(`SELECT m.*, u.first, u.last, u.email, u.phone FROM messages m LEFT JOIN users u ON u.id = m.user_id ${kind ? 'WHERE m.kind = ?' : ''} ORDER BY m.status = 'open' DESC, m.id DESC LIMIT 300`).all(...(kind ? [kind] : []));
+    res.json({ messages: rows });
+  });
+  admin.post('/messages/:id/reply', json, (req, res) => {
+    const m = db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(req.params.id)) || bad('Message not found.', 404);
+    const body = String((req.body || {}).body || '').trim().slice(0, 4000);
+    if (!body) bad('Write your reply first.');
+    db.prepare("UPDATE messages SET reply = ?, replied_at = ?, status = 'resolved' WHERE id = ?").run(body, Date.now(), m.id);
+    const u = m.user_id && getUser(m.user_id);
+    if (u) {
+      mailTo(u, `Seasonly support — your message #${m.id}`, `Bonjour ${u.first},\n\n${body}\n\n— The Seasonly team`);
+      notifier.push([u.id], { title: 'Seasonly support replied', body: body.slice(0, 120), url: '/#support' }).catch(() => {});
+    }
+    res.json({ ok: true });
+  });
+  admin.post('/messages/:id/:status(resolve|reopen)', (req, res) => {
+    db.prepare('UPDATE messages SET status = ? WHERE id = ?').run(req.params.status === 'resolve' ? 'resolved' : 'open', Number(req.params.id));
+    res.json({ ok: true });
+  });
   admin.get('/orders', (req, res) => res.json({ orders: flat('orders') }));
   admin.get('/referrals', (req, res) => {
     const rows = db.prepare('SELECT first, last, email, referral_code, referred_by, state, created_at FROM users WHERE verified = 1 AND referred_by IS NOT NULL ORDER BY created_at DESC').all();
@@ -581,7 +685,28 @@ function createApp(opts = {}) {
     res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? 'Something went wrong. Try again.' : err.message });
   });
 
-  return { app, db, notifier };
+  /* Push a reminder about one hour before each treatment. Runs every minute from server/index.js. */
+  async function runReminders(nowMs = Date.now()) {
+    const due = [];
+    db.tx(() => {
+      db.prepare('SELECT id, state FROM users WHERE verified = 1').all().forEach((u) => {
+        const s = JSON.parse(u.state);
+        let changed = false;
+        s.bookings.forEach((b) => {
+          if (b.reminded || !['booked', 'paid'].includes(b.status) || !b.startAt) return;
+          const left = b.startAt - nowMs;
+          if (left > 0 && left <= 60 * 60 * 1000) { b.reminded = true; changed = true; due.push({ userId: u.id, b }); }
+        });
+        if (changed) db.prepare('UPDATE users SET state = ? WHERE id = ?').run(JSON.stringify(s), u.id);
+      });
+    });
+    for (const { userId, b } of due) {
+      await notifier.push([userId], { title: `Your ${b.service} starts at ${b.slot}`, body: `${b.studio}. Tap for the details and the fastest route.`, url: `/#booking-${b.id}` }).catch(() => {});
+    }
+    return due.length;
+  }
+
+  return { app, db, notifier, runReminders };
 }
 
 module.exports = { createApp };

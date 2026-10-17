@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS outbox (
   error TEXT,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  topic TEXT,
+  ref TEXT,
+  rating INTEGER,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL,
+  reply TEXT,
+  replied_at INTEGER,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

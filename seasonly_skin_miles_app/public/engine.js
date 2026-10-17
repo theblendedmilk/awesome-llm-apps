@@ -100,13 +100,16 @@
   const REWARDS = { checkin: 20, tip: 10, booking: 150, welcome: 300, referral: 200 };
   const DEFAULT_REFERRAL = { perFriend: 5, cap: 20, welcome: 10 };
 
+  // Orders and bookings only earn miles once paid; refunds take them back.
+  const isPaid = (x) => x.status === 'paid' || x.status === 'refund_requested';
+  const MAX_OPEN_BOOKINGS = 3;
   const BADGES = [
     { id: 'first-ritual', name: 'First ritual', test: (s) => s.ledger.some((l) => l.kind === 'ritual') },
     { id: 'week-streak', name: '7-day streak', test: (s) => s.bestStreak >= 7 },
     { id: 'scholar', name: 'Skin scholar', test: (s) => s.quizBest >= 5 },
     { id: 'memory', name: 'Sharp memory', test: (s) => !!s.matchBest && s.matchBest <= 10 },
-    { id: 'shopper', name: 'Maison client', test: (s) => s.orders.length >= 1 },
-    { id: 'studio', name: 'Studio regular', test: (s) => s.bookings.length >= 1 },
+    { id: 'shopper', name: 'Maison client', test: (s) => s.orders.some(isPaid) },
+    { id: 'studio', name: 'Studio regular', test: (s) => s.bookings.some(isPaid) },
     { id: 'ambassador', name: 'Ambassadrice', test: (s) => s.referral.friends >= 1 },
   ];
 
@@ -158,7 +161,7 @@
     return [
       { key: `rituals-${week}`, name: 'Complete 5 rituals this week', v: Math.min(since('ritual', monday), 5), max: 5, rew: 150 },
       { key: `tips-${week}`, name: 'Read 3 wellness tips this week', v: Math.min(since('tip', monday), 3), max: 3, rew: 60 },
-      { key: `soin-${seasonKey}`, name: `Book one soin this ${se.name.toLowerCase()}`, v: Math.min(s.bookings.filter((b) => b.t >= se.start.getTime()).length, 1), max: 1, rew: 200 },
+      { key: `soin-${seasonKey}`, name: `Book one soin this ${se.name.toLowerCase()}`, v: Math.min(s.bookings.filter((b) => isPaid(b) && b.t >= se.start.getTime()).length, 1), max: 1, rew: 200 },
     ];
   }
 
@@ -187,6 +190,23 @@
       const after = tierOf(s.lifetime);
       if (after.name !== before.name) events.push({ type: 'tier', name: after.name, mult: after.mult });
       return amt;
+    };
+    const deduct = (amt, label) => {
+      // Balances can go below zero: a refund always takes back what the payment earned.
+      s.miles -= amt; s.lifetime = Math.max(0, s.lifetime - amt);
+      s.ledger.unshift({ t: now.getTime(), label, amt: -amt, kind: 'refund' });
+      events.push({ type: 'deduct', amt, label });
+    };
+    const restore = (item) => {
+      // Give back what was spent on an order or booking that didn't happen.
+      const code = item.voucher || (item.applied && item.applied.voucher);
+      const v = code && s.vouchers.find((x) => x.code === code);
+      if (v && v.expires > now.getTime()) v.used = false;
+      if (item.applied) {
+        if (item.applied.welcome) s.referral.welcome = Math.max(s.referral.welcome, item.applied.welcome);
+        if (item.applied.discount) s.referral.discount = Math.min(ref.cap, s.referral.discount + item.applied.discount);
+        item.applied = { voucher: null, welcome: 0, discount: 0 };
+      }
     };
     const markDone = (id) => { s.done[id] = dkey(now); };
     const p = action.payload || {};
@@ -302,42 +322,89 @@
           used.used = true;
         }
         const total = round2(Math.max(0, subtotal - disc));
-        const order = { id: `ORD-${now.getTime().toString(36).toUpperCase()}`, t: now.getTime(), lines, subtotal, discount: disc, total, voucher: used ? used.code : null };
+        const order = { id: `ORD-${now.getTime().toString(36).toUpperCase()}`, t: now.getTime(), lines, subtotal, discount: disc, total, voucher: used ? used.code : null,
+          status: 'pending', miles: Math.floor(total), credited: 0 };
         s.orders.unshift(order);
-        earn(Math.floor(total), `Order · ${lines.map((l) => l.name).join(', ')}`, 'order', false);
         result = { order };
         break;
       }
       case 'book': {
         const st = STUDIOS.find((x) => x.id === p.studio) || fail('Choose a Face Glow Bar.');
+        if (s.bookings.filter((b) => b.status === 'booked' && b.startAt > now.getTime()).length >= MAX_OPEN_BOOKINGS) fail(`You can hold up to ${MAX_OPEN_BOOKINGS} unpaid bookings. Cancel one or attend it first.`);
         const sv = SERVICES.find((x) => x.id === p.service) || fail('Choose a treatment.');
         const dayOffset = Math.floor(Number(p.day));
         if (!(dayOffset >= 1 && dayOffset <= 30) || !SLOTS.includes(p.slot)) fail('Choose a date and time.');
-        const lines = [];
+        const lines = [], applied = { voucher: null, welcome: 0, discount: 0 };
         let price = sv.price;
         if (p.voucher) {
           const v = s.vouchers.find((x) => x.code === p.voucher && !x.used && x.kind === 'service' && x.expires > now.getTime()) || fail('This voucher cannot be used.');
-          const d = discount(v, price); price -= d; v.used = true;
+          const d = discount(v, price); price -= d; v.used = true; applied.voucher = v.code;
           lines.push({ label: `Voucher ${v.code}`, amount: -d });
         }
         // Referral discounts: the friend's welcome offer on a first booking, and the referrer's earned credit.
         const base = price, refLines = [];
-        if (s.referral.welcome && !s.bookings.length) { refLines.push({ label: 'Welcome referral offer', pct: s.referral.welcome }); s.referral.welcome = 0; }
-        if (s.referral.discount) { refLines.push({ label: 'Referral reward', pct: s.referral.discount }); s.referral.discount = 0; }
+        if (s.referral.welcome && !s.bookings.some(isPaid)) { refLines.push({ label: 'Welcome referral offer', pct: s.referral.welcome }); applied.welcome = s.referral.welcome; s.referral.welcome = 0; }
+        if (s.referral.discount) { refLines.push({ label: 'Referral reward', pct: s.referral.discount }); applied.discount = s.referral.discount; s.referral.discount = 0; }
         let room = ref.cap;
         refLines.forEach((l) => {
           l.pct = Math.min(l.pct, room); room -= l.pct;
           l.amount = -round2(base * l.pct / 100); price += l.amount;
           if (l.pct) lines.push({ label: `${l.label} −${l.pct}%`, amount: l.amount });
         });
-        const firstBooking = !s.bookings.length;
         const date = addDays(now, dayOffset);
-        const booking = { id: `BK-${now.getTime().toString(36).toUpperCase()}`, t: now.getTime(), studio: st.name, studioId: st.id, service: sv.name, serviceId: sv.id,
-          date: dkey(date), slot: p.slot, list: sv.price, price: round2(Math.max(0, price)), lines };
+        const [hh, mm] = p.slot.split(':').map(Number);
+        const startAt = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm).getTime();
+        const booking = { id: `BK-${now.getTime().toString(36).toUpperCase()}`, t: now.getTime(), studio: st.name, studioId: st.id, addr: st.addr, service: sv.name, serviceId: sv.id,
+          mins: sv.mins, date: dkey(date), slot: p.slot, startAt, list: sv.price, price: round2(Math.max(0, price)), lines, applied,
+          status: 'booked', miles: REWARDS.booking, credited: 0, reminded: false };
         s.bookings.unshift(booking);
-        earn(REWARDS.booking, `Studio visit · ${sv.name}`, 'booking');
-        if (firstBooking && s.referral.referredBy) events.push({ type: 'referralQualified', code: s.referral.referredBy });
         result = { booking };
+        break;
+      }
+      case 'pay': {
+        // Server-only: payment confirmed (by the payment provider or by staff at the Face Glow Bar).
+        const list = p.kind === 'order' ? s.orders : p.kind === 'booking' ? s.bookings : fail('Unknown item.');
+        const item = list.find((x) => x.id === p.id) || fail('Not found.');
+        if (!['pending', 'booked'].includes(item.status)) fail('This is already paid, cancelled or refunded.');
+        item.status = 'paid'; item.paidAt = now.getTime();
+        const firstPaidBooking = p.kind === 'booking' && !s.bookings.some((b) => b !== item && isPaid(b) || (b !== item && b.status === 'refunded' && b.qualified));
+        item.credited = p.kind === 'order'
+          ? earn(item.miles, `Order ${item.id} paid`, 'order', false)
+          : earn(item.miles, `Studio visit · ${item.service}`, 'booking');
+        if (firstPaidBooking && s.referral.referredBy) { item.qualified = true; events.push({ type: 'referralQualified', code: s.referral.referredBy }); }
+        result = { item };
+        break;
+      }
+      case 'cancel': {
+        // Customer: an unpaid order or booking is cancelled; a paid one becomes a refund request.
+        const list = p.kind === 'order' ? s.orders : p.kind === 'booking' ? s.bookings : fail('Unknown item.');
+        const item = list.find((x) => x.id === p.id) || fail('Not found.');
+        if (['pending', 'booked'].includes(item.status)) {
+          item.status = 'cancelled'; item.cancelledAt = now.getTime();
+          restore(item);
+        } else if (item.status === 'paid') {
+          item.status = 'refund_requested'; item.refundRequestedAt = now.getTime();
+        } else fail('This can no longer be cancelled.');
+        result = { item };
+        break;
+      }
+      case 'refund': {
+        // Server-only: money returned, so the miles earned with it are taken back.
+        const list = p.kind === 'order' ? s.orders : p.kind === 'booking' ? s.bookings : fail('Unknown item.');
+        const item = list.find((x) => x.id === p.id) || fail('Not found.');
+        if (!['paid', 'refund_requested'].includes(item.status)) fail('Only paid items can be refunded.');
+        item.status = 'refunded'; item.refundedAt = now.getTime();
+        if (item.credited) deduct(item.credited, `Refund · ${p.kind === 'order' ? `order ${item.id}` : item.service}`);
+        restore(item);
+        if (item.qualified && s.referral.referredBy) events.push({ type: 'referralRevoked', code: s.referral.referredBy });
+        result = { item };
+        break;
+      }
+      case 'referralRevoke': {
+        // Applied to the referrer when the friend's qualifying booking was refunded.
+        s.referral.friends = Math.max(0, s.referral.friends - 1);
+        s.referral.discount = Math.max(0, s.referral.discount - ref.perFriend);
+        deduct(REWARDS.referral, `Referral reversed · ${p.name || 'a friend'}'s booking was refunded`);
         break;
       }
       case 'referralCredit': {
@@ -375,7 +442,7 @@
 
   return {
     SERVICES, STUDIOS, SLOTS, RITUALS, TIPS, QUIZ, WHEEL, SEASONS, VOUCHERS, TIERS, MILESTONES, REWARDS, BADGES, DEFAULT_REFERRAL,
-    dkey, addDays, isoWeek, seasonOf, mondayOf, tierOf, nextTier, discount, ritualProgress, canCheckIn, challengeList, doneOn,
+    dkey, addDays, isoWeek, seasonOf, mondayOf, tierOf, nextTier, discount, ritualProgress, canCheckIn, challengeList, doneOn, isPaid, MAX_OPEN_BOOKINGS,
     newState, apply, RuleError,
   };
 });

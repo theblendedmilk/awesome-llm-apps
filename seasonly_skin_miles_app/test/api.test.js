@@ -46,6 +46,13 @@ async function signup(c, extra = {}) {
   return v.data.user;
 }
 const act = (c, type, payload) => c.call('POST', '/api/actions', { type, payload });
+async function adminClient() {
+  const a = client();
+  await a.call('POST', '/api/admin/login', { email: 'admin@seasonly.fr', password: 'test-password-123' });
+  return a;
+}
+const adminOp = (a, kind, userId, id, op) => a.call('POST', `/api/admin/${kind}/${userId}/${encodeURIComponent(id)}/${op}`);
+const miles = async (c) => (await c.call('GET', '/api/me')).data.user.state.miles;
 
 // Minimal JPEG with an EXIF block carrying a fake GPS position, and a comment.
 function jpegWithExif() {
@@ -217,7 +224,7 @@ test('rewards run on the server', async () => {
   for (let i = 0; i < 4; i++) r = await act(c, 'ritualStep', { id: 'evening-lift' });
   assert.ok(r.data.events.some((e) => e.type === 'miles' && e.amt === 50));
   // Server-only actions are refused.
-  for (const type of ['welcome', 'referralCredit', 'avatar', 'adjust']) assert.equal((await act(c, type, { name: 'x' })).status, 400, type);
+  for (const type of ['welcome', 'referralCredit', 'referralRevoke', 'avatar', 'adjust', 'pay', 'refund']) assert.equal((await act(c, type, { name: 'x' })).status, 400, type);
 });
 
 test('vouchers, checkout with server prices, and booking', async () => {
@@ -248,8 +255,120 @@ test('vouchers, checkout with server prices, and booking', async () => {
   assert.equal((await act(c, 'book', { studio: 'canopee', service: 'gym', day: 0, slot: '10:00' })).status, 422);
 });
 
+test('miles are credited only after payment and taken back on refund', async () => {
+  const c = client();
+  const u = await signup(c, { channel: 'email' });
+  const a = await adminClient();
+  const start = await miles(c);
+  // Order: nothing credited until paid.
+  let r = await act(c, 'checkout', { lines: [{ id: 'serum-tensiolift', qty: 2 }] });
+  const o = r.data.result.order;
+  assert.equal(o.status, 'pending');
+  assert.equal(o.miles, 158);
+  assert.equal(await miles(c), start, 'no miles before payment');
+  assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(u.email, `%order ${o.id}%`), 'order email');
+  r = await adminOp(a, 'orders', u.id, o.id, 'pay');
+  assert.equal(r.status, 200);
+  assert.equal(r.data.item.credited, 158);
+  assert.equal(await miles(c), start + 158);
+  assert.equal((await adminOp(a, 'orders', u.id, o.id, 'pay')).status, 422, 'cannot pay twice');
+  // Customer asks for a refund; staff refunds; miles are deducted.
+  r = await act(c, 'cancel', { kind: 'order', id: o.id });
+  assert.equal(r.data.result.item.status, 'refund_requested');
+  assert.equal(await miles(c), start + 158, 'still credited until refunded');
+  r = await adminOp(a, 'orders', u.id, o.id, 'refund');
+  assert.equal(r.data.item.status, 'refunded');
+  assert.equal(await miles(c), start, 'refund takes the miles back');
+  const me = (await c.call('GET', '/api/me')).data.user.state;
+  assert.ok(me.ledger.some((l) => l.kind === 'refund' && l.amt === -158));
+  // Unpaid order cancelled: voucher comes back, no miles involved.
+  await a.call('POST', `/api/admin/users/${u.id}/miles`, { amount: 2000, reason: 'Gift' });
+  const E = require('../public/engine.js');
+  const v = E.VOUCHERS.find((x) => x.season === E.seasonOf(new Date()).id && x.kind === 'product');
+  const code = (await act(c, 'redeem', { id: v.id })).data.result.voucher.code;
+  const o2 = (await act(c, 'checkout', { lines: [{ id: 'creme-riche', qty: 1 }], voucher: code })).data.result.order;
+  r = await act(c, 'cancel', { kind: 'order', id: o2.id });
+  assert.equal(r.data.result.item.status, 'cancelled');
+  assert.equal(r.data.state.vouchers.find((x) => x.code === code).used, false, 'voucher restored');
+  assert.equal((await act(c, 'cancel', { kind: 'order', id: o2.id })).status, 422);
+  // Booking: confirmation email, credited when paid at the studio.
+  const before = await miles(c);
+  r = await act(c, 'book', { studio: 'canopee', service: 'glow', day: 2, slot: '13:00' });
+  const b = r.data.result.booking;
+  assert.equal(b.status, 'booked');
+  assert.equal(await miles(c), before);
+  const mail = ctx.db.prepare('SELECT * FROM outbox WHERE to_addr = ? AND subject LIKE ? ORDER BY id DESC').get(u.email, '%is booked%');
+  assert.ok(mail && mail.body.includes('4 passage de la Canopée') && mail.body.includes('google.com/maps/dir'), 'booking confirmation with directions');
+  await adminOp(a, 'bookings', u.id, b.id, 'pay');
+  assert.ok(await miles(c) > before);
+  // Up to 3 unpaid bookings at a time.
+  for (let i = 0; i < 3; i++) assert.equal((await act(c, 'book', { studio: 'canopee', service: 'gym', day: 5 + i, slot: '10:00' })).status, 200);
+  assert.equal((await act(c, 'book', { studio: 'canopee', service: 'gym', day: 9, slot: '10:00' })).status, 422);
+});
+
+test('booking confirmation is never emailed to an unconfirmed address', async () => {
+  const c = client();
+  const u = await signup(c); // phone confirmed only
+  await act(c, 'book', { studio: 'canopee', service: 'gym', day: 2, slot: '10:00' });
+  assert.equal(ctx.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(u.email, '%is booked%').n, 0);
+});
+
+test('push reminder one hour before the treatment', async () => {
+  const c = client();
+  const u = await signup(c);
+  const b = (await act(c, 'book', { studio: 'canopee', service: 'gym', day: 1, slot: '10:00' })).data.result.booking;
+  assert.equal(await ctx.runReminders(b.startAt - 2 * 3600 * 1000), 0, 'too early');
+  assert.equal(await ctx.runReminders(b.startAt - 55 * 60 * 1000), 1, 'within the hour');
+  assert.equal(await ctx.runReminders(b.startAt - 50 * 60 * 1000), 0, 'only once');
+  const push = ctx.db.prepare("SELECT * FROM outbox WHERE channel = 'push' AND subject LIKE ? ORDER BY id DESC").get('%starts at 10:00%');
+  assert.ok(push, 'reminder sent');
+  const state = (await c.call('GET', '/api/me')).data.user.state;
+  assert.equal(state.bookings.find((x) => x.id === b.id).reminded, true);
+  // Cancelled bookings get no reminder.
+  const b2 = (await act(c, 'book', { studio: 'canopee', service: 'gym', day: 1, slot: '13:00' })).data.result.booking;
+  await act(c, 'cancel', { kind: 'booking', id: b2.id });
+  assert.equal(await ctx.runReminders(b2.startAt - 30 * 60 * 1000), 0);
+  assert.ok(u.id);
+});
+
+test('support, feedback and ideas reach the admin inbox', async () => {
+  const c = client();
+  const u = await signup(c, { channel: 'email' });
+  assert.equal((await c.call('POST', '/api/support', { topic: 'Booking', message: 'hi' })).status, 400, 'too short');
+  let r = await c.call('POST', '/api/support', { topic: 'Booking', ref: 'BK-1', message: 'Can I move my treatment to Friday?' });
+  assert.equal(r.status, 201);
+  assert.ok(ctx.db.prepare("SELECT 1 FROM outbox WHERE to_addr = 'hello@seasonly.fr' AND subject LIKE ?").get(`%Support #${r.data.id}%`), 'team notified');
+  assert.equal((await c.call('POST', '/api/feedback', { kind: 'feedback', rating: 9, message: 'Great' })).status, 400);
+  assert.equal((await c.call('POST', '/api/feedback', { kind: 'feedback', rating: 5, message: 'Love the rituals' })).status, 201);
+  assert.equal((await c.call('POST', '/api/feedback', { kind: 'idea', message: 'A night routine timer please' })).status, 201);
+  assert.equal((await client().call('POST', '/api/support', { message: 'anonymous message' })).status, 401);
+  const a = await adminClient();
+  const inbox = (await a.call('GET', '/api/admin/messages')).data.messages.filter((m) => m.user_id === u.id);
+  assert.deepEqual(inbox.map((m) => m.kind).sort(), ['feedback', 'idea', 'support']);
+  const sup = inbox.find((m) => m.kind === 'support');
+  assert.equal((await a.call('POST', `/api/admin/messages/${sup.id}/reply`, { body: 'Of course, done!' })).status, 200);
+  const mine = (await c.call('GET', '/api/me/messages')).data.messages.find((m) => m.id === sup.id);
+  assert.equal(mine.reply, 'Of course, done!');
+  assert.equal(mine.status, 'resolved');
+  assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND body LIKE ?').get(u.email, '%Of course, done!%'), 'reply emailed');
+  assert.equal((await a.call('GET', '/api/admin/messages?kind=idea')).data.messages.every((m) => m.kind === 'idea'), true);
+});
+
+test('admin panel is closed without a password; codes only go to served countries', async () => {
+  const fs2 = require('node:fs');
+  const closed = createApp({ dbFile: ':memory:', dataDir: fs2.mkdtempSync(path.join(os.tmpdir(), 'seasonly-closed-')), env: { NODE_ENV: '', ADMIN_PASSWORD: '' }, log: quiet });
+  const s2 = await new Promise((ok) => { const x = closed.app.listen(0, '127.0.0.1', () => ok(x)); });
+  const res = await fetch(`http://127.0.0.1:${s2.address().port}/api/admin/login`, { method: 'POST', headers: { 'X-Seasonly': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@seasonly.fr', password: 'seasonly-admin' }) });
+  assert.equal(res.status, 503);
+  s2.close();
+  const uk = await client().call('POST', '/api/auth/signup', { first: 'Al', email: 'al@example.co.uk', phone: '+447700900123', consent: true });
+  assert.equal(uk.status, 400);
+  assert.match(uk.data.error, /France/);
+});
+
 test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async () => {
   const ref = client();
+  const a = await adminClient();
   const referrer = await signup(ref, { channel: 'email' }); // confirms the email, so the reward email can go out
   const friends = [];
   for (let i = 0; i < 5; i++) {
@@ -258,6 +377,9 @@ test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async 
     assert.equal(fu.state.referral.welcome, 10);
     const b = await act(f, 'book', { studio: 'saint-lazare', service: 'signature', day: 3, slot: '14:30' });
     assert.equal(b.data.result.booking.price, 45, 'friend pays €50 − 10%');
+    // Booking alone doesn't count: the friend must pay for the treatment.
+    if (i === 0) assert.equal((await ref.call('GET', '/api/me')).data.user.state.referral.friends, 0);
+    await adminOp(a, 'bookings', fu.id, b.data.result.booking.id, 'pay');
     // A second booking by the same friend doesn't count twice.
     const b2 = await act(f, 'book', { studio: 'saint-lazare', service: 'signature', day: 4, slot: '14:30' });
     assert.equal(b2.data.result.booking.price, 50);
@@ -275,7 +397,24 @@ test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async 
   const self = await client().call('POST', '/api/auth/signup', { first: 'Me', email: referrer.email, phone: '0600000099', consent: true, referral: referrer.referralCode });
   assert.equal(self.status, 400);
   // Referrer was notified by email.
-  assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(referrer.email, '%just booked%'));
+  assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(referrer.email, '%reward is ready%'));
+  // A refunded qualifying booking reverses the reward.
+  const f = client();
+  const fu = await signup(f, { referral: referrer.referralCode });
+  const fb = (await act(f, 'book', { studio: 'canopee', service: 'gym', day: 2, slot: '10:00' })).data.result.booking;
+  await adminOp(a, 'bookings', fu.id, fb.id, 'pay');
+  let st = (await ref.call('GET', '/api/me')).data.user.state;
+  assert.equal(st.referral.friends, 6);
+  await adminOp(a, 'bookings', fu.id, fb.id, 'refund');
+  st = (await ref.call('GET', '/api/me')).data.user.state;
+  assert.equal(st.referral.friends, 5);
+  assert.ok(st.ledger.some((l) => l.kind === 'refund' && l.amt === -200));
+  // A friend with only an email confirmed (no phone proof) doesn't earn the referrer anything.
+  const e = client();
+  const eu = await signup(e, { referral: referrer.referralCode, channel: 'email' });
+  const eb = (await act(e, 'book', { studio: 'canopee', service: 'gym', day: 3, slot: '10:00' })).data.result.booking;
+  await adminOp(a, 'bookings', eu.id, eb.id, 'pay');
+  assert.equal((await ref.call('GET', '/api/me')).data.user.state.referral.friends, 5);
 });
 
 test('profile photo: metadata stripped, encrypted at rest, owner-only', async () => {

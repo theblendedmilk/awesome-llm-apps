@@ -135,6 +135,9 @@
         avatarUrl = { v: user.avatarVersion, url: URL.createObjectURL(await res.blob()) };
         return avatarUrl.url;
       },
+      support: (d) => call('POST', '/support', d),
+      feedback: (d) => call('POST', '/feedback', d),
+      messages: async () => (await call('GET', '/me/messages')).messages,
       pushSubscribe: (subscription) => call('POST', '/push/subscribe', { subscription }),
       pushUnsubscribe: (endpoint) => call('POST', '/push/unsubscribe', { endpoint }),
     };
@@ -225,6 +228,9 @@
         return { user: pub(u), isNew };
       },
       async logout() { db.session = null; save(); return { ok: true }; },
+      async support(d) { const u = db.users[db.session]; u.messages = [{ id: Date.now(), kind: 'support', topic: d.topic, ref: d.ref, body: d.message, status: 'open', created_at: Date.now() }, ...(u.messages || [])]; save(); return { id: u.messages[0].id }; },
+      async feedback(d) { const u = db.users[db.session]; u.messages = [{ id: Date.now(), kind: d.kind, rating: d.rating, body: d.message, status: 'open', created_at: Date.now() }, ...(u.messages || [])]; save(); return { id: u.messages[0].id }; },
+      async messages() { return (db.users[db.session] || {}).messages || []; },
       async deleteAccount() { delete db.users[db.session]; db.session = null; save(); return { ok: true }; },
       async act(type, payload) {
         const u = db.users[db.session];
@@ -237,7 +243,7 @@
           if (r) r.state = E.apply(r.state, { type: 'referralCredit', payload: { name: u.state.profile.first } }, ctx()).state;
         });
         save();
-        return { state: out.state, events: out.events.filter((e) => e.type !== 'referralQualified'), result: out.result };
+        return { state: out.state, events: out.events.filter((e) => !['referralQualified', 'referralRevoked'].includes(e.type)), result: out.result };
       },
       async uploadAvatar(blob) {
         const u = db.users[db.session];
@@ -282,10 +288,37 @@
     } catch (e) { toast(e.message, '', 'error'); throw e; }
   }
   function showEvent(e) {
-    if (e.type === 'miles') toast(`+${nf(e.amt)} miles`, e.label);
+    if (e.type === 'miles') { toast(`+${nf(e.amt)} miles`, e.label); milesBurst(e.amt); }
+    else if (e.type === 'deduct') toast(`−${nf(e.amt)} miles`, e.label, 'error');
     else if (e.type === 'badge') toast('Badge unlocked', e.name, 'badge');
     else if (e.type === 'tier') toast(`Welcome to ${e.name}`, `Earn ×${e.mult} miles from now on`, 'tier');
     else if (e.type === 'referral') toast(`${e.name} booked`, `You now have ${e.discount}% off your next booking`, 'tier');
+  }
+
+  /* Short celebration when miles are credited: a glass pill rises with sparkles while the counters count up. */
+  let burstTimer = null;
+  function milesBurst(amt) {
+    if (!(amt > 0)) return;
+    const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const host = document.querySelector('.device') || document.body;
+    const el = document.createElement('div');
+    el.className = 'miles-burst';
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = `<div class="mb-pill">${ic('star', 20, 2)}<b>+${nf(amt)}</b><span>Skin Miles</span></div>${reduce ? '' : Array.from({ length: 12 }, (_, i) => `<i style="--a:${i * 30}deg;--d:${60 + (i % 3) * 22}px;animation-delay:${(i % 4) * 40}ms"></i>`).join('')}`;
+    host.appendChild(el);
+    setTimeout(() => el.remove(), reduce ? 1200 : 1700);
+    clearTimeout(burstTimer);
+    burstTimer = setTimeout(() => countUp(amt, reduce), 120);
+  }
+  function countUp(amt, reduce) {
+    const target = S ? S.miles : 0, from = target - amt;
+    document.querySelectorAll('[data-miles]').forEach((n) => {
+      if (reduce) { n.textContent = nf(target); return; }
+      const t0 = performance.now(), dur = 900;
+      const step = (t) => { const k = Math.min(1, (t - t0) / dur); n.textContent = nf(from + (target - from) * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+      n.textContent = nf(from); requestAnimationFrame(step);
+      n.classList.add('bump'); setTimeout(() => n.classList.remove('bump'), 900);
+    });
   }
 
   /* ---------- Render ---------- */
@@ -333,7 +366,7 @@
     return `<button class="miles-card glass" data-a="tab" data-arg="rewards">
       <span class="star-badge">${ic('star', 18)}</span>
       <span class="mc-body"><span class="eyebrow muted">Your Seasonly miles</span>
-        <span class="mc-num">${nf(S.miles)} <small>${nt ? `/ ${nf(nt.min)} lifetime to ${nt.name}` : `${t.name} · top tier`}</small></span>
+        <span class="mc-num"><span data-miles>${nf(S.miles)}</span> <small>${nt ? `/ ${nf(nt.min)} lifetime to ${nt.name}` : `${t.name} · top tier`}</small></span>
         <span class="bar"><i style="width:${pct}%"></i></span></span></button>`;
   }
   function productCard(p) {
@@ -411,7 +444,7 @@
         <p class="eyebrow accent mt16">${p.purpose === 'login' ? 'Sign in' : 'Step 2 of 2'}</p>
         <h1 class="serif-h">Confirm your <em class="accent">${p.channel === 'email' ? 'email' : 'number'}</em></h1>
         <p class="muted">We sent a 6-digit code ${to}. ${p.channel === 'both' ? 'Each one gets its own code: enter either of them.' : ''} It expires in 10 minutes.</p>
-        ${p.devCode ? `<div class="demo-code">${ic('phone', 18)}<span>${B.mode === 'demo' ? 'Demo mode — no real message is sent.' : 'Development mode.'} Your code is <b>${esc(p.devCode)}</b></span></div>` : ''}
+        ${p.devCode ? `<div class="demo-code">${ic('phone', 18)}<span>${B.mode === 'demo' ? 'Demo mode — no real message is sent.' : 'Development mode.'} ${p.devEmailCode ? `SMS code <b>${esc(p.devCode)}</b> · email code <b class="email-code">${esc(p.devEmailCode)}</b>` : `Your code is <b>${esc(p.devCode)}</b>`}</span></div>` : ''}
         <form class="stack" data-form="verify" novalidate>
           <label class="field otp" for="code"><span>Confirmation code</span>
             <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="••••••" required></label>
@@ -462,7 +495,7 @@
         </div>
       </section>
       <button class="stats glass" data-a="tab" data-arg="rewards">
-        <span class="stat"><span class="stat-ic">${ic('star', 16)}</span><b>${nf(S.miles)}</b><small>Miles</small></span>
+        <span class="stat"><span class="stat-ic">${ic('star', 16)}</span><b data-miles>${nf(S.miles)}</b><small>Miles</small></span>
         <span class="stat"><span class="stat-ic">${ic('clock', 16)}</span><b>${S.streak}</b><small>Day streak</small></span>
         <span class="stat"><span class="stat-ic">${ic('eye', 16)}</span><b>+${radiance}%</b><small>Radiance</small></span>
       </button>
@@ -558,7 +591,8 @@
             ${preview ? preview.lines.map((l) => `<div class="sum-row"><span class="muted">${esc(l.label)}</span><b class="accent">−${eur(-l.amount)}</b></div>`).join('') : ''}
             <div class="sum-row big"><span>Total at the Face Glow Bar</span><b>${eur(preview ? preview.price : sv.price)}</b></div>
           </div>
-          <button class="btn-dark wide mt16" data-a="confirm-booking" ${ui.busy ? 'disabled' : ''}>Confirm · +150 miles</button>`;
+          <p class="muted sm center mt12">You pay at the Face Glow Bar. ${E.REWARDS.booking} Skin Miles are credited once it's paid.</p>
+          <button class="btn-dark wide mt12" data-a="confirm-booking" ${ui.busy ? 'disabled' : ''}>Confirm my booking</button>`;
       }
       const steps = ['Studio', 'Soin', 'Date', 'Confirm'];
       return `<div class="pad top">
@@ -583,7 +617,7 @@
         <h1 class="serif-h">Your <em class="accent">rewards</em></h1>
         <section class="wallet">
           <div class="row between"><span class="eyebrow">${t.name} member</span><span class="chip-glass dark">${s.name} · W${E.isoWeek(new Date())}</span></div>
-          <div class="wallet-num">${nf(S.miles)}<small>miles</small></div>
+          <div class="wallet-num"><span data-miles>${nf(S.miles)}</span><small>miles</small></div>
           <div class="bar light"><i style="width:${pct}%"></i></div>
           <p class="wallet-note">${nt ? `${nf(nt.min - S.lifetime)} lifetime miles to <b>${nt.name}</b> · earn ×${nt.mult}` : 'Top tier reached · earn ×1.5 on everything'}</p>
         </section>
@@ -632,10 +666,14 @@
         </div>
         <input type="file" id="photoInput" accept="image/jpeg,image/png,image/heic,image/heif,image/webp" hidden>
         <p class="privacy-note">${ic('shield', 16)} <span>Your photo is resized on your phone, its location data is removed, and it is stored encrypted. Only you can see it.</span></p>
+        ${upcomingSection()}
+        ${purchasesSection()}
         ${referralCard()}
-        ${S.bookings.length ? `${sectionHead('My visits')}<div class="stack">${S.bookings.slice(0, 3).map((b) => `<div class="card">
-          <b class="serif-t">${esc(b.service)}</b><small class="muted block">${esc(b.studio)} · ${new Date(b.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} · ${esc(b.slot)}</small>
-          <small class="block">${eur(b.price)}${b.price < b.list ? ` <s class="muted">${eur(b.list)}</s>` : ''}</small></div>`).join('')}</div>` : ''}
+        ${sectionHead('Help & ideas')}
+        <div class="card settings">
+          <button class="set-row" data-a="support"><span>${ic('mail', 18)} <span><b>Contact support</b><small class="muted block">A question about a booking, an order or your account</small></span></span>${ic('chevron', 16)}</button>
+          <button class="set-row" data-a="feedback"><span>${ic('sparkle', 18)} <span><b>Share feedback or an idea</b><small class="muted block">Tell us what to improve or what to build next</small></span></span>${ic('chevron', 16)}</button>
+        </div>
         ${sectionHead('Settings')}
         <div class="card settings">
           ${pushOk ? `<div class="set-row"><span>${ic('bell', 18)} <span><b>Notifications</b><small class="muted block">Rewards, new seasons, referral news</small></span></span>
@@ -652,7 +690,7 @@
           <p><b>Daily check-in</b> +20 · bonus at 7, 14, 30, 100 and 365 days</p>
           <p><b>Wellness tip</b> +10 each, daily · <b>Rituals</b> +30 to +50</p>
           <p><b>Games</b> Glow Match, Skin Quiz & Glow Wheel, once a day</p>
-          <p><b>Orders</b> 1 mile per €1 · <b>Face Glow Bar visits</b> +150</p>
+          <p><b>Orders</b> 1 mile per €1 · <b>Face Glow Bar visits</b> +150, credited once paid. A refund takes them back.</p>
           <p class="muted">Tiers multiply every non-purchase reward: Éclat ×1.1, Rayonnance ×1.25, Lumière ×1.5.</p>
         </div>
         <button class="btn-ghost wide mt16 danger" data-a="delete-account">Delete my account</button>
@@ -661,12 +699,135 @@
     },
   };
 
+  /* ---------- Bookings & orders ---------- */
+  const STATUS = {
+    booked: ['grey', 'Pay at the Face Glow Bar'], pending: ['grey', 'Awaiting payment'], paid: ['ok', 'Paid'],
+    refund_requested: ['soft', 'Refund requested'], refunded: ['soft', 'Refunded'], cancelled: ['grey', 'Cancelled'],
+  };
+  const statusPill = (it) => { const [c, l] = STATUS[it.status] || ['grey', it.status || 'Paid']; return `<span class="st-pill ${c}">${l}</span>`; };
+  const milesNote = (it) => (it.status === 'paid' || it.status === 'refund_requested' ? `+${nf(it.credited)} Skin Miles credited`
+    : it.status === 'refunded' ? (it.credited ? `${nf(it.credited)} Skin Miles deducted` : 'Refunded')
+    : it.status === 'cancelled' ? 'No miles' : `+${nf(it.miles || 0)} Skin Miles once paid`);
+  const whenTxt = (b) => `${new Date(b.startAt || b.date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · ${b.slot}`;
+  const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  function routeLinks(addr) {
+    const g = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}&travelmode=transit`;
+    const a = `https://maps.apple.com/?daddr=${encodeURIComponent(addr)}&dirflg=r`;
+    const link = (href, cls, label) => `<a class="${cls} wide route" href="${href}" target="_blank" rel="noopener">${ic('locate', 16)} ${label}</a>`;
+    return isIOS() ? link(a, 'btn-dark', 'Fastest route') + link(g, 'btn-ghost', 'Open in Google Maps')
+      : link(g, 'btn-dark', 'Fastest route') + link(a, 'btn-ghost', 'Open in Apple Maps');
+  }
+  const upcoming = () => S.bookings.filter((b) => ['booked', 'paid'].includes(b.status) && (b.startAt || 0) > Date.now() - (b.mins || 15) * 60000).sort((a, b) => a.startAt - b.startAt);
+  function upcomingSection() {
+    const list = upcoming();
+    return `${sectionHead('Upcoming treatments')}${list.length ? `<div class="stack">${list.slice(0, 3).map((b) => `<button class="card item-row" data-a="booking" data-arg="${esc(b.id)}">
+      <span class="item-ic">${ic('calendar', 20)}</span>
+      <span class="grow"><b class="serif-t block">${esc(b.service)}</b><small class="muted block">${esc(whenTxt(b))}</small><small class="muted block">${esc(b.studio)}</small></span>
+      <span class="item-side">${statusPill(b)}<small class="muted">${eur(b.price)}</small></span></button>`).join('')}</div>`
+      : `<button class="card empty-row" data-a="tab" data-arg="book">${ic('calendar', 18)} <span>No treatment booked yet. <b>Book a Face Glow Bar session</b></span></button>`}`;
+  }
+  function purchasesSection() {
+    return `${sectionHead('Latest purchases')}${S.orders.length ? `<div class="stack">${S.orders.slice(0, 5).map((o) => `<button class="card item-row" data-a="order" data-arg="${esc(o.id)}">
+      <span class="item-ic">${ic('bag', 20)}</span>
+      <span class="grow"><b class="block">${esc(o.lines.map((l) => `${l.qty > 1 ? `${l.qty} × ` : ''}${l.name}`).join(', '))}</b><small class="muted block">${new Date(o.t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })} · ${esc(o.id)}</small></span>
+      <span class="item-side">${statusPill(o)}<small class="muted">${eur(o.total)}</small></span></button>`).join('')}</div>`
+      : `<button class="card empty-row" data-a="tab" data-arg="shop">${ic('bag', 18)} <span>No purchase yet. <b>Visit the boutique</b></span></button>`}`;
+  }
+  function bookingDetail(id, fresh = false) {
+    const b = S.bookings.find((x) => x.id === id);
+    if (!b) return `<div class="sheet-pad center"><p class="muted">This booking is no longer in your account.</p><button class="btn-dark wide mt16" data-a="close">Close</button></div>`;
+    const canCancel = ['booked', 'paid'].includes(b.status) && b.startAt > Date.now();
+    return `<div class="sheet-pad">
+      <div class="row between"><p class="eyebrow accent">${fresh ? 'À bientôt' : 'Your treatment'}</p><button class="icon-btn" data-a="close" aria-label="Close">${ic('close', 18)}</button></div>
+      <h2 class="serif-h sm">${esc(b.service)}</h2>
+      ${fresh ? `<p class="muted">Your booking is confirmed.${U.emailVerified ? ` A confirmation email is on its way to ${esc(U.email)}.` : ''}</p>` : ''}
+      <div class="card summary mt12">
+        <div class="sum-row"><span class="muted">When</span><b>${esc(whenTxt(b))}</b></div>
+        <div class="sum-row"><span class="muted">Duration</span><b>${b.mins || 15} min</b></div>
+        <div class="sum-row"><span class="muted">Where</span><b>${esc(b.studio)}</b></div>
+        <div class="sum-row"><span class="muted">Address</span><b>${esc(b.addr || '')}</b></div>
+        <hr>
+        <div class="sum-row"><span class="muted">Price</span><b>${eur(b.list)}</b></div>
+        ${(b.lines || []).map((l) => `<div class="sum-row"><span class="muted">${esc(l.label)}</span><b class="accent">−${eur(-l.amount)}</b></div>`).join('')}
+        <div class="sum-row big"><span>To pay</span><b>${eur(b.price)}</b></div>
+        <div class="sum-row"><span class="muted">Status</span>${statusPill(b)}</div>
+        <div class="sum-row"><span class="muted">Skin Miles</span><b>${milesNote(b)}</b></div>
+        <div class="sum-row"><span class="muted">Reference</span><b>${esc(b.id)}</b></div>
+      </div>
+      ${['booked', 'paid'].includes(b.status) && b.addr ? `<div class="stack mt12">${routeLinks(b.addr)}</div>
+        <p class="muted sm center mt8">${U.push ? 'We will remind you one hour before.' : 'Turn on notifications in your profile to get a reminder one hour before.'}</p>` : ''}
+      ${B.mode === 'demo' && b.status === 'booked' ? `<button class="btn-ghost wide mt12" data-a="sim-pay" data-arg="booking:${esc(b.id)}">Simulate payment at the studio (demo)</button>` : ''}
+      ${canCancel ? `<button class="btn-ghost wide mt8 danger" data-a="cancel-item" data-arg="booking:${esc(b.id)}">${b.status === 'paid' ? 'Request a refund' : 'Cancel this booking'}</button>` : ''}
+      <button class="btn-dark wide mt12" data-a="close">Done</button></div>`;
+  }
+  function orderDetail(id, fresh = false) {
+    const o = S.orders.find((x) => x.id === id);
+    if (!o) return `<div class="sheet-pad center"><p class="muted">This order is no longer in your account.</p><button class="btn-dark wide mt16" data-a="close">Close</button></div>`;
+    return `<div class="sheet-pad">
+      <div class="row between"><p class="eyebrow accent">${fresh ? 'Merci !' : 'Your order'}</p><button class="icon-btn" data-a="close" aria-label="Close">${ic('close', 18)}</button></div>
+      <h2 class="serif-h sm">${fresh ? 'Order received' : `Order ${esc(o.id)}`}</h2>
+      ${fresh ? `<p class="muted">We'll confirm as soon as your payment goes through. Your Skin Miles are credited at that moment.</p>` : ''}
+      <div class="card summary mt12">
+        ${o.lines.map((l) => `<div class="sum-row"><span>${l.qty} × ${esc(l.name)}</span><b>${eur(Math.round(l.price * l.qty * 100) / 100)}</b></div>`).join('')}
+        <hr>
+        ${o.discount ? `<div class="sum-row"><span class="muted">Voucher ${esc(o.voucher || '')}</span><b class="accent">−${eur(o.discount)}</b></div>` : ''}
+        <div class="sum-row big"><span>Total</span><b>${eur(o.total)}</b></div>
+        <div class="sum-row"><span class="muted">Status</span>${statusPill(o)}</div>
+        <div class="sum-row"><span class="muted">Skin Miles</span><b>${milesNote(o)}</b></div>
+        <div class="sum-row"><span class="muted">Reference</span><b>${esc(o.id)}</b></div>
+      </div>
+      ${B.mode === 'demo' && o.status === 'pending' ? `<button class="btn-ghost wide mt12" data-a="sim-pay" data-arg="order:${esc(o.id)}">Simulate payment (demo)</button>` : ''}
+      ${['pending', 'paid'].includes(o.status) ? `<button class="btn-ghost wide mt8 danger" data-a="cancel-item" data-arg="order:${esc(o.id)}">${o.status === 'paid' ? 'Request a refund' : 'Cancel this order'}</button>` : ''}
+      <button class="btn-dark wide mt12" data-a="close">Done</button></div>`;
+  }
+
+  /* ---------- Support & feedback ---------- */
+  let myMessages = null;
+  function supportView() {
+    const refs = [...upcoming().map((b) => [b.id, `${b.service} · ${whenTxt(b)}`]), ...S.orders.slice(0, 5).map((o) => [o.id, `Order ${o.id}`])];
+    return `<div class="sheet-pad">
+      <div class="row between"><p class="eyebrow accent">Contact support</p><button class="icon-btn" data-a="close" aria-label="Close">${ic('close', 18)}</button></div>
+      <h2 class="serif-h sm">How can we <em class="accent">help</em>?</h2>
+      <p class="muted">We usually answer within one working day, here and by email.</p>
+      <form class="stack" data-form="support">
+        <label class="field" for="supTopic"><span>Topic</span><select id="supTopic" name="topic">${['Booking', 'Order', 'Account', 'Skin Miles', 'Other'].map((t) => `<option>${t}</option>`).join('')}</select></label>
+        ${refs.length ? `<label class="field" for="supRef"><span>About (optional)</span><select id="supRef" name="ref"><option value="">—</option>${refs.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select></label>` : ''}
+        <label class="field" for="supMsg"><span>Your message</span><textarea id="supMsg" name="message" rows="5" maxlength="4000" required placeholder="Tell us what happened…"></textarea></label>
+        <button class="btn-dark wide" type="submit">Send to Seasonly</button>
+      </form>
+      <div id="supList">${supportList()}</div>
+    </div>`;
+  }
+  // Earlier messages load after the sheet opens; only this list is redrawn, so nothing typed is lost.
+  function supportList() {
+    const mine = (myMessages || []).filter((m) => m.kind === 'support');
+    return mine.length ? `${sectionHead('Your messages')}<div class="stack">${mine.slice(0, 5).map((m) => `<div class="card msg">
+        <div class="row between"><b>${esc(m.topic || 'Support')}</b><span class="st-pill ${m.reply || m.status === 'resolved' ? 'ok' : 'grey'}">${m.reply ? 'Answered' : m.status === 'resolved' ? 'Resolved' : 'Sent'}</span></div>
+        <p class="muted sm">${esc(m.body)}</p>${m.reply ? `<p class="reply"><b>Seasonly:</b> ${esc(m.reply)}</p>` : ''}</div>`).join('')}</div>` : '';
+  }
+  let fbKind = 'feedback', fbRating = 0;
+  function feedbackView() {
+    return `<div class="sheet-pad">
+      <div class="row between"><p class="eyebrow accent">Your voice</p><button class="icon-btn" data-a="close" aria-label="Close">${ic('close', 18)}</button></div>
+      <h2 class="serif-h sm">Help us <em class="accent">grow</em></h2>
+      <form class="stack" data-form="feedback">
+        <div class="seg-btns" role="radiogroup" aria-label="Type">
+          <button type="button" class="${fbKind === 'feedback' ? 'on' : ''}" data-a="fb-kind" data-arg="feedback" role="radio" aria-checked="${fbKind === 'feedback'}">Feedback</button>
+          <button type="button" class="${fbKind === 'idea' ? 'on' : ''}" data-a="fb-kind" data-arg="idea" role="radio" aria-checked="${fbKind === 'idea'}">Feature idea</button>
+        </div>
+        ${fbKind === 'feedback' ? `<div class="stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="${n <= fbRating ? 'on' : ''}" data-a="fb-star" data-arg="${n}" aria-label="${n} star${n > 1 ? 's' : ''}">${ic('star', 26, 1.6)}</button>`).join('')}</div>` : ''}
+        <label class="field" for="fbMsg"><span>${fbKind === 'idea' ? 'What should we build next?' : 'What do you like, what can we do better?'}</span>
+          <textarea id="fbMsg" name="message" rows="5" maxlength="4000" required placeholder="${fbKind === 'idea' ? 'I would love to…' : 'I enjoyed…'}"></textarea></label>
+        <button class="btn-dark wide" type="submit">Send</button>
+      </form></div>`;
+  }
+
   /* ---------- Referral ---------- */
   const refRules = () => CONFIG.referral || E.DEFAULT_REFERRAL;
   function referralTeaser() {
     const r = refRules();
     return `<button class="ref-teaser" data-a="tab" data-arg="rewards">${ic('users', 20)}
-      <span><b>Invite a friend, get up to ${r.cap}% off</b><small>${r.perFriend}% off your next treatment for each friend who books</small></span>${ic('chevron', 16)}</button>`;
+      <span><b>Invite a friend, get up to ${r.cap}% off</b><small>${r.perFriend}% off your next treatment for each friend who comes in</small></span>${ic('chevron', 16)}</button>`;
   }
   function refBanner() {
     const parts = [];
@@ -680,11 +841,11 @@
     const steps = Array.from({ length: Math.ceil(r.cap / r.perFriend) }, (_, i) => (i + 1) * r.perFriend <= S.referral.discount);
     return `${sectionHead('Invite friends')}
       <section class="card referral">
-        <p class="muted sm">Your friend gets <b>${r.welcome}% off</b> their first Face Glow Bar treatment. When they confirm their account and book, you get <b>${r.perFriend}% off</b> your next booking, up to <b>${r.cap}%</b>, plus 200 Skin Miles.</p>
+        <p class="muted sm">Your friend gets <b>${r.welcome}% off</b> their first Face Glow Bar treatment. When they confirm their mobile number and pay for their first treatment, you get <b>${r.perFriend}% off</b> your next booking, up to <b>${r.cap}%</b>, plus 200 Skin Miles.</p>
         <div class="ref-code"><span class="code big">${esc(U.referralCode || S.referral.code)}</span>
           <button class="btn-ghost xs" data-a="copy-ref">${ic('copy', 14)} Copy</button><button class="btn-dark xs" data-a="share-ref">${ic('share', 14)} Share</button></div>
         <div class="ref-steps">${steps.map((on, i) => `<span class="${on ? 'on' : ''}">−${(i + 1) * r.perFriend}%</span>`).join('')}</div>
-        <p class="sm"><b>${S.referral.friends}</b> ${S.referral.friends === 1 ? 'friend has' : 'friends have'} booked · ${S.referral.discount ? `current reward <b class="accent">−${S.referral.discount}%</b> on your next booking` : 'your reward starts with the first friend who books'}</p>
+        <p class="sm"><b>${S.referral.friends}</b> ${S.referral.friends === 1 ? 'friend has' : 'friends have'} come in · ${S.referral.discount ? `current reward <b class="accent">−${S.referral.discount}%</b> on your next booking` : 'your reward starts with the first friend who comes in'}</p>
       </section>`;
   }
   const refLink = () => `${location.origin}${location.pathname}#ref-${U.referralCode || S.referral.code}`;
@@ -810,7 +971,8 @@
           <div class="sum-row"><span class="muted">Delivery</span><b>${subtotal >= 69 ? 'Free' : 'Free from €69'}</b></div>
           <div class="sum-row big"><span>Total</span><b>${eur(total)}</b></div>
         </div>
-        <button class="btn-dark wide mt16" data-a="checkout" ${ui.busy ? 'disabled' : ''}>Checkout · earn ${nf(Math.floor(total))} miles</button>`
+        <p class="muted sm center mt12">${nf(Math.floor(total))} Skin Miles are credited once your payment is confirmed.</p>
+        <button class="btn-dark wide mt12" data-a="checkout" ${ui.busy ? 'disabled' : ''}>Place my order · ${eur(total)}</button>`
       : `<div class="empty-bag"><span>${ic('bag', 36, 1.2)}</span><p class="serif-t">Your bag is empty</p><p class="muted sm">Every €1 you spend earns 1 Skin Mile.</p>
          <button class="btn-dark mt16" data-a="go-shop">Visit the boutique</button></div>`}
     </div>`;
@@ -824,11 +986,7 @@
     ui.busy = false;
     bag.set([]); bagVoucher = null;
     const o = out.result.order;
-    openSheet(`<div class="sheet-pad center">
-      <div class="ticket-big">${ic('check', 40, 1.6)}</div>
-      <p class="eyebrow accent mt16">Merci !</p><h2 class="serif-h sm">Order confirmed</h2>
-      <p class="muted">Order ${o.id} · ${eur(o.total)}${o.discount ? ` · you saved ${eur(o.discount)}` : ''}. You earned <b>${nf(Math.floor(o.total))} Skin Miles</b>.</p>
-      <button class="btn-dark wide mt16" data-a="close">Continue</button></div>`);
+    openSheet(() => orderDetail(o.id, true));
     rerender();
   }
 
@@ -1169,12 +1327,7 @@
       ui.busy = false;
       const bk = out.result.booking;
       ui.step = 1; ui.bk = { studio: null, service: null, day: 1, slot: null, voucher: null };
-      openSheet(`<div class="sheet-pad center"><div class="ticket-big">${ic('calendar', 40, 1.3)}</div>
-        <p class="eyebrow accent mt16">À bientôt</p><h2 class="serif-h sm">${esc(bk.service)}</h2>
-        <p class="muted">${esc(bk.studio)}<br>${new Date(bk.date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · ${esc(bk.slot)}</p>
-        <p class="serif-t mt8">${eur(bk.price)}${bk.price < bk.list ? ` <s class="muted">${eur(bk.list)}</s>` : ''}</p>
-        ${bk.lines.map((l) => `<p class="accent sm">${esc(l.label)}</p>`).join('')}
-        <button class="btn-dark wide mt16" data-a="close">Done</button></div>`);
+      openSheet(() => bookingDetail(bk.id, true));
     },
     rename() {
       openSheet(`<div class="sheet-pad"><p class="eyebrow accent">Profile</p><h2 class="serif-h sm">Your name</h2>
@@ -1187,6 +1340,38 @@
     push: togglePush,
     'copy-ref'() { copyText(U.referralCode || S.referral.code); },
     'share-ref'() { if (navigator.share) navigator.share({ title: 'Seasonly', text: refText(), url: refLink() }).catch(() => copyText(`${refText()} ${refLink()}`)); else copyText(`${refText()} ${refLink()}`); },
+    booking(arg) { openSheet(() => bookingDetail(arg)); },
+    order(arg) { openSheet(() => orderDetail(arg)); },
+    'cancel-item'(arg) {
+      const [kind, id] = arg.split(':');
+      const it = (kind === 'order' ? S.orders : S.bookings).find((x) => x.id === id);
+      if (!it) return;
+      const paid = it.status === 'paid';
+      openSheet(`<div class="sheet-pad center"><p class="eyebrow accent">${paid ? 'Refund' : 'Cancel'}</p>
+        <h2 class="serif-h sm">${paid ? 'Request a refund?' : kind === 'order' ? 'Cancel this order?' : 'Cancel this booking?'}</h2>
+        <p class="muted">${paid ? `Our team will refund you shortly. The ${nf(it.credited)} Skin Miles earned with this payment will then be deducted.` : 'Any voucher or referral discount you used will be available again.'}</p>
+        <button class="btn-dark wide mt16 danger-fill" data-a="cancel-ok" data-arg="${esc(arg)}">${paid ? 'Request a refund' : 'Yes, cancel'}</button>
+        <button class="btn-ghost wide mt8" data-a="${kind}" data-arg="${esc(id)}">Keep it</button></div>`);
+    },
+    async 'cancel-ok'(arg, el) {
+      const [kind, id] = arg.split(':');
+      el.disabled = true;
+      try { const out = await act('cancel', { kind, id }); toast(out.result.item.status === 'refund_requested' ? 'Refund requested' : 'Cancelled', '', 'bag'); } catch { return; }
+      openSheet(() => (kind === 'order' ? orderDetail(id) : bookingDetail(id)));
+    },
+    async 'sim-pay'(arg, el) {
+      const [kind, id] = arg.split(':');
+      el.disabled = true;
+      try { await act('pay', { kind, id }); } catch { return; }
+      refreshSheet(); rerender();
+    },
+    async support() {
+      myMessages = null; openSheet(supportView);
+      try { myMessages = await B.messages(); const l = $('#supList'); if (l) l.innerHTML = supportList(); } catch { /* the list is optional */ }
+    },
+    feedback() { fbKind = 'feedback'; fbRating = 0; openSheet(feedbackView); },
+    'fb-kind'(arg) { const m = $('#fbMsg'); const keep = m ? m.value : ''; fbKind = arg; refreshSheet(); const n = $('#fbMsg'); if (n) n.value = keep; },
+    'fb-star'(arg) { const m = $('#fbMsg'); const keep = m ? m.value : ''; fbRating = +arg; refreshSheet(); const n = $('#fbMsg'); if (n) n.value = keep; },
     logout() {
       openSheet(`<div class="sheet-pad center"><p class="eyebrow accent">Log out</p><h2 class="serif-h sm">See you soon, ${esc(U.first)}</h2>
         <p class="muted">Your miles, vouchers and streak stay safe in your account.</p>
@@ -1230,6 +1415,20 @@
       if (out.isNew) setTimeout(() => toast(`Bienvenue ${out.user.first}`, '+300 Skin Miles welcome gift', 'tier'), 300);
       history.replaceState(null, '', location.pathname);
     },
+    async support(f) {
+      await B.support({ topic: f.topic.value, ref: f.ref ? f.ref.value : '', message: f.message.value });
+      openSheet(`<div class="sheet-pad center"><div class="ticket-big">${ic('mail', 40, 1.3)}</div>
+        <p class="eyebrow accent mt16">Message sent</p><h2 class="serif-h sm">Merci, ${esc(U.first)}</h2>
+        <p class="muted">We usually answer within one working day${U.emailVerified ? `, here and at ${esc(U.email)}` : ''}.</p>
+        <button class="btn-dark wide mt16" data-a="close">Done</button></div>`);
+    },
+    async feedback(f) {
+      await B.feedback({ kind: fbKind, rating: fbKind === 'feedback' && fbRating ? fbRating : null, message: f.message.value });
+      openSheet(`<div class="sheet-pad center"><div class="ticket-big">${ic('sparkle', 40, 1.3)}</div>
+        <p class="eyebrow accent mt16">${fbKind === 'idea' ? 'Idea received' : 'Feedback received'}</p><h2 class="serif-h sm">Thank you</h2>
+        <p class="muted">Every message is read by the Seasonly team.</p>
+        <button class="btn-dark wide mt16" data-a="close">Done</button></div>`);
+    },
     async rename(f) {
       await act('profile', { first: f.nameFirst.value, last: f.nameLast.value }, { quiet: true });
       U.first = S.profile.first; U.last = S.profile.last;
@@ -1249,7 +1448,7 @@
     e.preventDefault();
     if (ui.busy) return;
     ui.busy = true; ui.error = '';
-    const authForm = name !== 'rename';
+    const authForm = !['rename', 'support', 'feedback'].includes(name);
     if (authForm) render();
     try { await FORMS[name](e.target.closest('form') || e.target); }
     catch (err) { ui.error = err.message; if (!authForm) toast(err.message, '', 'error'); }
@@ -1273,6 +1472,17 @@
   document.addEventListener('contextmenu', (e) => { if (e.target.closest('.protected')) e.preventDefault(); });
   document.addEventListener('dragstart', (e) => { if (e.target.closest('.protected')) e.preventDefault(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet.classList.contains('open')) closeSheet(); });
+
+  /* Links from notifications and emails: #booking-<id>, #support, #profile. */
+  function routeHash() {
+    if (!U) return;
+    const h = location.hash;
+    const m = h.match(/^#booking-([A-Z0-9-]{3,40})$/);
+    if (m) { ui.tab = 'profile'; render(); A.booking(m[1]); }
+    else if (h === '#support') { ui.tab = 'profile'; render(); A.support(); }
+    else if (h === '#profile') { ui.tab = 'profile'; render(); }
+    if (m || h === '#support' || h === '#profile') history.replaceState(null, '', location.pathname);
+  }
 
   /* ---------- Boot ---------- */
   async function detectServer() {
@@ -1298,6 +1508,8 @@
     }
     if (U && ref) ui.auth = 'welcome';
     render();
+    routeHash();
+    window.addEventListener('hashchange', routeHash);
     if (B.mode === 'server' && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   })();
 })();

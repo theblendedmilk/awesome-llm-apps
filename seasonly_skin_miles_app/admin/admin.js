@@ -22,8 +22,17 @@
   let toastTimer;
   function toast(msg) { toastEl.textContent = msg; toastEl.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.hidden = true; }, 2800); }
 
+  const STATUS = { booked: ['grey', 'Unpaid · pay at studio'], pending: ['grey', 'Awaiting payment'], paid: ['ok', 'Paid'], refund_requested: ['bad', 'Refund requested'], refunded: ['soft', 'Refunded'], cancelled: ['grey', 'Cancelled'] };
+  const statusPill = (x) => { const [c, l] = STATUS[x.status] || ['ok', 'Paid']; return `<span class="pill ${c}">${l}</span>`; };
+  const payButtons = (kind, x) => {
+    const ref = `data-kind="${kind}" data-user="${x.userId}" data-id="${esc(x.id)}"`;
+    if (['booked', 'pending'].includes(x.status)) return `<button class="btn sm" data-a="pay" ${ref}>Mark as paid</button>`;
+    if (['paid', 'refund_requested'].includes(x.status)) return `<button class="btn ghost sm" data-a="refund" ${ref}>Refund</button>`;
+    return '';
+  };
+  const milesCell = (x) => (x.credited ? `${x.status === 'refunded' ? '−' : '+'}${nf(x.credited)}` : `<span class="muted">${nf(x.miles || 0)} on payment</span>`);
   const state = { me: null, view: 'dashboard', data: {}, q: '', modal: null, error: '' };
-  const VIEWS = [['dashboard', 'Dashboard'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
+  const VIEWS = [['dashboard', 'Dashboard'], ['inbox', 'Inbox'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
     ['referrals', 'Referrals'], ['email', 'Email'], ['push', 'Push notifications'], ['outbox', 'Sent messages'], ['settings', 'Settings']];
 
   /* ---------- Views ---------- */
@@ -34,9 +43,9 @@
       const ch = state.me.channels;
       const k = (label, v) => `<div class="kpi"><small>${label}</small><b>${v}</b></div>`;
       return `<p class="eyebrow">Overview</p><h1 class="title">Bonjour, <em>Seasonly</em></h1>
-        <div class="kpis">${k('Customers', nf(s.users))}${k('Bookings', nf(s.bookings))}${k('Orders', nf(s.orders))}${k('Revenue (orders)', eur(s.revenue))}
+        <div class="kpis">${k('Customers', nf(s.users))}${k('Bookings', nf(s.bookings))}${k('Orders', nf(s.orders))}${k('Paid revenue (orders)', eur(s.revenue))}
         ${k('Miles issued', nf(s.milesIssued))}${k('Miles unspent', nf(s.milesBalance))}${k('Vouchers redeemed', nf(s.vouchers))}${k('Successful referrals', nf(s.referrals))}
-        ${k('Push subscribers', nf(s.pushSubscribers))}${k('Products', nf(s.products))}</div>
+        ${k('Push subscribers', nf(s.pushSubscribers))}${k('Products', nf(s.products))}${k('Open messages', nf(s.openMessages))}${k('Refund requests', nf(s.refundRequests))}${k('Awaiting payment', nf(s.awaitingPayment))}</div>
         <div class="card" style="margin-top:18px"><h3>Delivery channels</h3>
           <div class="row" style="margin-top:10px">
             <span class="pill ${ch.email ? 'ok' : 'grey'}">Email ${ch.email ? 'connected' : 'logging only'}</span>
@@ -71,20 +80,37 @@
     },
     bookings() {
       const list = state.data.bookings;
-      return `<p class="eyebrow">Face Glow Bar</p><h1 class="title">Bookings</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No bookings yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Reference</th><th>Customer</th><th>Treatment</th><th>Face Glow Bar</th><th>Date</th><th class="num">Price</th><th>Discounts</th><th>Booked</th></tr></thead><tbody>
+      return `<p class="eyebrow">Face Glow Bar</p><h1 class="title">Bookings</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No bookings yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Reference</th><th>Customer</th><th>Treatment</th><th>Face Glow Bar</th><th>Date</th><th class="num">Price</th><th>Discounts</th><th>Status</th><th class="num">Miles</th><th></th></tr></thead><tbody>
         ${list.map((b) => `<tr><td>${esc(b.id)}</td><td>${esc(b.customer)}<div class="muted">${esc(b.email)}</div></td><td>${esc(b.service)}</td><td>${esc(b.studio)}</td>
           <td>${esc(new Date(b.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }))} · ${esc(b.slot)}</td>
           <td class="num">${eur(b.price)}${b.price < b.list ? `<div class="muted"><s>${eur(b.list)}</s></div>` : ''}</td>
-          <td>${(b.lines || []).map((l) => `<div class="muted">${esc(l.label)}</div>`).join('') || '—'}</td><td>${when(b.t)}</td></tr>`).join('')}
+          <td>${(b.lines || []).map((l) => `<div class="muted">${esc(l.label)}</div>`).join('') || '—'}</td><td>${statusPill(b)}<div class="muted">booked ${when(b.t)}</div></td>
+          <td class="num">${milesCell(b)}</td><td class="num">${payButtons('bookings', b)}</td></tr>`).join('')}
         </tbody></table></div>`}`;
     },
     orders() {
       const list = state.data.orders;
-      return `<p class="eyebrow">Boutique</p><h1 class="title">Orders</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No orders yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th class="num">Subtotal</th><th class="num">Voucher</th><th class="num">Total</th><th>Date</th></tr></thead><tbody>
+      return `<p class="eyebrow">Boutique</p><h1 class="title">Orders</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No orders yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th class="num">Subtotal</th><th class="num">Voucher</th><th class="num">Total</th><th>Status</th><th class="num">Miles</th><th></th></tr></thead><tbody>
         ${list.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.customer)}<div class="muted">${esc(o.email)}</div></td>
           <td>${o.lines.map((l) => `${l.qty} × ${esc(l.name)}`).join('<br>')}</td><td class="num">${eur(o.subtotal)}</td>
-          <td class="num">${o.discount ? `−${eur(o.discount)}<div class="muted">${esc(o.voucher)}</div>` : '—'}</td><td class="num"><b>${eur(o.total)}</b></td><td>${when(o.t)}</td></tr>`).join('')}
+          <td class="num">${o.discount ? `−${eur(o.discount)}<div class="muted">${esc(o.voucher)}</div>` : '—'}</td><td class="num"><b>${eur(o.total)}</b></td><td>${statusPill(o)}<div class="muted">${when(o.t)}</div></td>
+          <td class="num">${milesCell(o)}</td><td class="num">${payButtons('orders', o)}</td></tr>`).join('')}
         </tbody></table></div>`}`;
+    },
+    inbox() {
+      const list = state.data.messages, f = state.inboxKind || '';
+      const KIND = { support: ['bad', 'Support'], feedback: ['soft', 'Feedback'], idea: ['ok', 'Feature idea'] };
+      return `<p class="eyebrow">Customers</p><h1 class="title">Inbox</h1>
+        <div class="row" style="margin-bottom:14px">${[['', 'All'], ['support', 'Support'], ['feedback', 'Feedback'], ['idea', 'Feature ideas']].map(([k, l]) => `<button class="btn ${f === k ? '' : 'ghost'} sm" data-a="inbox-kind" data-id="${k}">${l}</button>`).join('')}</div>
+        ${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No messages yet.</p>' : list.map((m) => `<div class="card msg-card">
+          <div class="row between"><div class="row"><span class="pill ${KIND[m.kind][0]}">${KIND[m.kind][1]}</span>${m.topic && m.kind === 'support' ? `<b>${esc(m.topic)}</b>` : ''}${m.ref ? `<span class="muted">· ${esc(m.ref)}</span>` : ''}${m.rating ? `<span class="stars-txt">${'★'.repeat(m.rating)}${'☆'.repeat(5 - m.rating)}</span>` : ''}</div>
+            <span class="pill ${m.status === 'open' ? 'grey' : 'ok'}">${m.status === 'open' ? 'Open' : 'Resolved'}</span></div>
+          <p style="margin:10px 0;white-space:pre-wrap">${esc(m.body)}</p>
+          <p class="muted">${esc(`${m.first || 'Deleted account'} ${m.last || ''}`.trim())}${m.email ? ` · ${esc(m.email)}` : ''}${m.phone ? ` · ${esc(m.phone)}` : ''} · ${when(m.created_at)}</p>
+          ${m.reply ? `<p class="notice" style="margin-top:10px"><b>Your reply:</b> ${esc(m.reply)}</p>` : ''}
+          ${m.kind === 'support' && !m.reply && m.user_id ? `<form class="stack" data-form="reply" data-id="${m.id}" style="margin-top:10px"><label class="f">Reply (sent by email and shown in the app)<textarea name="body" id="rp-${m.id}" required maxlength="4000" style="min-height:90px"></textarea></label><div class="row"><button class="btn sm">Send reply</button></div></form>` : ''}
+          <div class="row" style="margin-top:10px"><button class="btn ghost sm" data-a="msg-status" data-id="${m.id}" data-status="${m.status === 'open' ? 'resolve' : 'reopen'}">${m.status === 'open' ? 'Mark resolved' : 'Reopen'}</button></div>
+        </div>`).join('')}`;
     },
     referrals() {
       const list = state.data.referrals, s = state.data.settings;
@@ -216,7 +242,7 @@
   }
   async function load(view) {
     const map = { dashboard: [['stats', '/stats']], products: [['products', '/products']], customers: [['users', `/users?q=${encodeURIComponent(state.q)}`]],
-      bookings: [['bookings', '/bookings']], orders: [['orders', '/orders']], referrals: [['referrals', '/referrals'], ['settings', '/settings']],
+      bookings: [['bookings', '/bookings']], orders: [['orders', '/orders']], inbox: [['messages', `/messages${state.inboxKind ? `?kind=${state.inboxKind}` : ''}`]], referrals: [['referrals', '/referrals'], ['settings', '/settings']],
       outbox: [['outbox', '/outbox']], settings: [['settings', '/settings']], push: [['stats', '/stats']], email: [] };
     const jobs = map[view] || [];
     if (!jobs.length) return;
@@ -244,6 +270,17 @@
     'modal-close'() { state.modal = null; state.error = ''; render(); },
     'modal-bg'(el, e) { if (e.target === el) A['modal-close'](); },
     miles(el) { state.error = ''; state.modal = milesModal(el.dataset.id, el.dataset.name); render(); },
+    async pay(el) {
+      try { const r = await api('POST', `/${el.dataset.kind}/${el.dataset.user}/${encodeURIComponent(el.dataset.id)}/pay`); toast(`Marked as paid · +${r.item.credited} miles credited`); load(state.view); } catch (e) { toast(e.message); }
+    },
+    async refund(el) {
+      const key = `${el.dataset.kind}:${el.dataset.id}`;
+      if (state.confirmRefund !== key) { state.confirmRefund = key; toast('Press Refund again to confirm. The miles earned will be deducted.'); return; }
+      state.confirmRefund = null;
+      try { const r = await api('POST', `/${el.dataset.kind}/${el.dataset.user}/${encodeURIComponent(el.dataset.id)}/refund`); toast(`Refunded · ${r.item.credited} miles deducted`); load(state.view); } catch (e) { toast(e.message); }
+    },
+    'inbox-kind'(el) { state.inboxKind = el.dataset.id; state.data.messages = null; render(); load('inbox'); },
+    async 'msg-status'(el) { try { await api('POST', `/messages/${el.dataset.id}/${el.dataset.status}`); load('inbox'); } catch (e) { toast(e.message); } },
     async 'hero-remove'() { try { await api('DELETE', '/settings/hero'); toast('Photo removed'); load('settings'); } catch (e) { toast(e.message); } },
   };
   const FORMS = {
@@ -276,6 +313,10 @@
       const r = await api('POST', '/push', { audience: f.audience.value, to: f.to.value, title: f.title.value, body: f.body.value, url: f.url.value });
       toast(`Delivered to ${r.sent} of ${r.subscriptions} device(s)`);
       f.reset();
+    },
+    async reply(f) {
+      await api('POST', `/messages/${f.dataset.id}/reply`, { body: f.body.value });
+      toast('Reply sent'); load('inbox');
     },
     async referral(f) {
       await api('PUT', '/settings', { referral: { welcome: f.welcome.value, perFriend: f.perFriend.value, cap: f.cap.value } });

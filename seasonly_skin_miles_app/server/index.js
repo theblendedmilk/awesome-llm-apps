@@ -10,6 +10,8 @@ if (fs.existsSync(envFile)) {
   }
 }
 const { createApp } = require('./app');
-const { app } = createApp();
+const { app, runReminders } = createApp();
+// Booking reminders: check every minute for treatments starting within the hour.
+setInterval(() => runReminders().catch((e) => console.error('reminders', e)), 60 * 1000).unref();
 const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => console.log(`Seasonly running on http://localhost:${port}  ·  admin: http://localhost:${port}/admin`));

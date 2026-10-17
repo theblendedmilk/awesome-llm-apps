@@ -7,7 +7,7 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node server/index.js",
-    "dev": "DEV_SHOW_CODES=1 node server/index.js",
+    "dev": "NODE_ENV=development DEV_SHOW_CODES=1 node server/index.js",
     "test": "node --test test/api.test.js",
     "e2e": "node test/e2e.js",
     "test:all": "node --test test/api.test.js && node test/e2e.js"

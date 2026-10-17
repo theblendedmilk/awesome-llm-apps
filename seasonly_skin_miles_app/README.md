@@ -60,9 +60,9 @@ In production, codes are never shown on screen. If no SMS or email provider is c
 | Guided ritual | +30 to +50 |
 | Glow Match / Skin Quiz / Glow Wheel | up to 80 / 50 / 100 per day |
 | Weekly and seasonal challenges | +60 to +200 |
-| Order | 1 per €1 |
-| Face Glow Bar booking | +150 |
-| Friend referred and booked | +200 |
+| Order | 1 per €1, **credited once paid** |
+| Face Glow Bar treatment | +150, **credited once paid at the studio** |
+| Friend referred, phone confirmed and treatment paid | +200 |
 
 Tiers (Bourgeon, Éclat, Rayonnance, Lumière) multiply non-purchase rewards up to ×1.5. Miles buy **seasonal vouchers**: product vouchers apply in the bag and treatment vouchers at booking. Only the current season can be redeemed, and next season is shown as a preview.
 
@@ -84,10 +84,35 @@ The Face Glow Bar treatments (Gym, Glow, Winter, 15 min, €25) and the three Pa
 
 **Product photos are not included.** seasonly.fr could not be reached from the build environment, and its photos belong to Seasonly. Upload them in **Admin → Products → Edit → Upload photo**. Until then, each product shows an illustrated bottle. Check the prices in the admin before launch.
 
+## Payments, refunds and miles
+
+- **Credited only after payment:** placing an order or booking a treatment earns nothing yet. Staff click **Mark as paid** in **Admin → Bookings / Orders**, and the miles are credited with an animation in the app, a push notification and an email receipt. A payment provider (Stripe, for example) can trigger the same step: call the engine's `pay` action from its webhook.
+- **Refunds take miles back:**
+  - Unpaid orders and bookings can be cancelled from **Profile**. This gives back any voucher or referral discount used.
+  - For paid ones, the customer requests a refund; staff click **Refund**, and the miles earned are deducted. The balance can go below zero if they were already spent.
+  - A refunded qualifying booking also reverses the referrer's reward.
+- **Referrals:** a referral counts only when the friend confirmed a mobile number by SMS and paid for their first treatment.
+- **Booking limit:** at most 3 unpaid bookings at a time.
+
+## Bookings, reminders and support
+
+- **Booking confirmation email:** sent to the customer's confirmed email, with the address and a directions link.
+- **Profile:** shows upcoming treatments and the latest boutique purchases, with their status. Tap one for every detail, the fastest route (Google Maps, or Apple Maps on iPhone) and cancel or refund.
+- **Reminder:** a push notification goes out about 1 hour before each treatment. The server checks every minute, and its time zone defaults to Europe/Paris. Tapping it opens the booking details with the route.
+- **Contact support:** Profile → Contact support. Messages land in **Admin → Inbox**, the team gets an email at `SUPPORT_EMAIL`, and replies are emailed to the customer and shown in the app.
+- **Feedback and feature ideas:** Profile → Share feedback or an idea (with a 1–5 star rating for feedback). They appear in the same Inbox.
+
+## Security defaults
+
+- **Admin panel:** closed unless `ADMIN_PASSWORD` is set. `npm run dev` uses the development password `seasonly-admin`.
+- **Sign-up codes by SMS:** only sent to mobile numbers in France, Belgium, Switzerland, Luxembourg and Monaco. Change the list with `SMS_COUNTRIES`, for example `+33,+32`.
+- **Sign-in:** a code is only sent to an email or phone the customer confirmed.
+
 ## Admin panel (`/admin`)
 
 | Section | What it does |
 |---|---|
+| Inbox | Support messages, feedback and feature ideas; reply by email, mark resolved |
 | Dashboard | Customers, bookings, orders, revenue, miles, referrals, push subscribers, and which delivery channels are connected |
 | Products | Add, edit, hide or delete products, with photo, price, "was" price, size, category, badge and results |
 | Customers | Search customers and adjust miles with a reason the customer sees |

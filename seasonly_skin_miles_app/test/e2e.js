@@ -45,7 +45,14 @@ async function run(n, browser) {
   const step = (msg) => { console.log(`  [run ${n}] ${msg}`); doing = `after "${msg}"`; };
   const code = async (page) => (await page.textContent('.demo-code b')).trim();
   const tab = (page, name) => page.click(`.tab[aria-label="${name}"]`);
-  const miles = async (page) => Number((await page.textContent('.stats .stat b')).replace(/\D/g, ''));
+  // Wait for the count-up animation to finish before reading the balance.
+  const miles = async (page) => { await page.waitForFunction(() => !document.querySelector('[data-miles].bump'), null, { timeout: 5000 }); return Number((await page.textContent('[data-miles]')).replace(/\D/g, '')); };
+  // Staff actions (mark a booking as paid) go through the admin API.
+  const adminApi = async () => {
+    const r = await fetch(base + '/api/admin/login', { method: 'POST', headers: { 'X-Seasonly': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(ADMIN) });
+    const ck = r.headers.get('set-cookie').split(';')[0];
+    return (m, u, b) => fetch(base + '/api/admin' + u, { method: m, headers: { 'X-Seasonly': '1', 'Content-Type': 'application/json', cookie: ck }, body: b ? JSON.stringify(b) : undefined }).then((x) => x.json());
+  };
 
   try {
     /* 1. Sign up with SMS code */
@@ -59,16 +66,17 @@ async function run(n, browser) {
     assert.match(await p.textContent('.form-error'), /first name/, 'validation shows');
     await p.fill('#first', 'Marie'); await p.fill('#last', 'Dupont');
     await p.fill('#email', `marie${n}@example.fr`); await p.fill('#phone', '06 12 34 56 7' + n);
+    await p.click('.seg label:has-text("Both")');
     await p.check('#consent');
     await shot(p, '02-signup');
     await p.click('button[type="submit"]');
     await p.waitForSelector('#code');
-    assert.match(await p.textContent('.auth'), /by SMS to/);
+    assert.match(await p.textContent('.auth'), /by SMS to .* and by email to/);
     await shot(p, '03-verify');
     await p.fill('#code', '000000');
     await p.waitForSelector('.form-error');
     assert.match(await p.textContent('.form-error'), /not right/);
-    await p.fill('#code', await code(p));
+    await p.fill('#code', (await p.textContent('.demo-code b.email-code')).trim()); // confirms her email
     await p.waitForSelector('.stats');
     assert.equal(await miles(p), 300, 'welcome gift');
     assert.match(await p.$eval('.hero .hero-photo', (el) => el.style.backgroundImage), /img\/hero\.jpg/, 'campaign photo on home');
@@ -92,6 +100,7 @@ async function run(n, browser) {
     /* 3. Wellness tip and a full ritual */
     await p.click('.card.tip');
     await p.click('[data-a="tip-done"]');
+    await p.waitForSelector('.miles-burst', { state: 'attached', timeout: 3000 }); // credit animation
     await p.waitForTimeout(500);
     assert.equal(await miles(p), 330);
     await p.click('.ritual-card [data-a="ritual"]');
@@ -146,10 +155,13 @@ async function run(n, browser) {
     await p.click('.icon-btn[aria-label="Bag"]');
     await p.waitForSelector('[data-a="checkout"]');
     assert.match(await p.textContent('.sheet-card'), /€26/);
+    const beforeOrder = await miles(p);
     await p.click('[data-a="checkout"]');
-    await p.waitForSelector('text=Order confirmed');
+    await p.waitForSelector('text=Order received');
+    assert.match(await p.textContent('.sheet-card'), /Awaiting payment/);
     await p.click('.sheet-card [data-a="close"]');
-    step('boutique + checkout ✓');
+    assert.equal(await miles(p), beforeOrder, 'no miles before payment');
+    step('boutique + order awaiting payment ✓');
 
     /* 6. Profile photo upload (protected) */
     await tab(p, 'Profile');
@@ -158,7 +170,23 @@ async function run(n, browser) {
     assert.equal(await p.$('.profile-card img'), null, 'photo is not an <img>');
     assert.equal(await p.$eval('.profile-card .avatar', (el) => getComputedStyle(el).userSelect), 'none');
     await shot(p, '10-profile');
-    step('profile photo ✓');
+    assert.match(await p.textContent('#app'), /Latest purchases[\s\S]*Gelée Nettoyante[\s\S]*Awaiting payment/);
+    step('profile photo + latest purchases ✓');
+
+    /* 6b. Contact support and share an idea */
+    await p.click('[data-a="support"]');
+    await p.selectOption('#supTopic', 'Order');
+    await p.fill('#supMsg', 'When will my cleansing jelly ship?');
+    await p.click('button:has-text("Send to Seasonly")');
+    await p.waitForSelector('text=Message sent');
+    await p.click('.sheet-card [data-a="close"]');
+    await p.click('[data-a="feedback"]');
+    await p.click('[data-a="fb-kind"][data-arg="idea"]');
+    await p.fill('#fbMsg', 'A night routine reminder would be lovely');
+    await p.click('.sheet-card button:has-text("Send")');
+    await p.waitForSelector('text=Idea received');
+    await p.click('.sheet-card [data-a="close"]');
+    step('support + feature idea ✓');
 
     /* 7. Referral code, then log out */
     const refCode = (await p.textContent('.referral .code')).trim();
@@ -177,11 +205,10 @@ async function run(n, browser) {
     await f.waitForSelector('#referral');
     assert.equal(await f.inputValue('#referral'), refCode);
     await f.fill('#first', 'Julie'); await f.fill('#email', `julie${n}@example.fr`); await f.fill('#phone', '07 11 22 33 4' + n);
-    await f.click('.seg label:has-text("Email")');
     await f.check('#consent');
     await f.click('button[type="submit"]');
     await f.waitForSelector('#code');
-    assert.match(await f.textContent('.auth'), /by email to/);
+    assert.match(await f.textContent('.auth'), /by SMS to/);
     await f.fill('#code', await code(f));
     await f.waitForSelector('.stats');
     await tab(f, 'Book');
@@ -195,18 +222,39 @@ async function run(n, browser) {
     await shot(f, '11-book-referral');
     await f.click('[data-a="confirm-booking"]');
     await f.waitForSelector('text=À bientôt');
+    const bookingId = (await f.textContent('.sheet-card')).match(/BK-[A-Z0-9]+/)[0];
+    assert.ok(await f.$('.sheet-card a.route[href*="maps"]'), 'route link');
+    await f.click('.sheet-card [data-a="close"]');
     step('friend signs up with link + books with −10% ✓');
+
+    /* 8b. Staff marks the treatment as paid: Julie's miles are credited, the referral counts */
+    const admin = await adminApi();
+    const bk = (await admin('GET', '/bookings')).bookings.find((x) => x.id === bookingId);
+    await tab(f, 'Home');
+    const juliesBefore = await miles(f);
+    const paid = await admin('POST', `/bookings/${bk.userId}/${bookingId}/pay`);
+    assert.equal(paid.item.status, 'paid');
+    await f.reload(); await f.waitForSelector('.stats');
+    assert.equal(await miles(f), juliesBefore + 150);
+    // Reminder link from the push notification opens the booking with directions.
+    await f.goto(`${base}/#booking-${bookingId}`);
+    await f.waitForSelector('.sheet-card a.route');
+    assert.match(await f.textContent('.sheet-card'), /Face Glow Bar La Canopée[\s\S]*4 passage de la Canopée/);
+    await shot(f, '11b-booking-detail');
+    await f.click('.sheet-card [data-a="close"]');
+    assert.match(await f.textContent('#app'), /Upcoming treatments[\s\S]*Soin Signature[\s\S]*Paid/);
+    step('payment credits miles + booking details from reminder link ✓');
 
     /* 9. Marie signs back in by SMS code and sees her reward */
     await p.click('text=I already have an account');
-    await p.fill('#identifier', '06 12 34 56 7' + n); // Marie confirmed her phone at sign-up
+    await p.fill('#identifier', `marie${n}@example.fr`); // Marie confirmed her email at sign-up
     await p.click('button[type="submit"]');
     await p.waitForSelector('#code');
     await p.fill('#code', await code(p));
     await p.waitForSelector('.stats');
     await tab(p, 'Rewards');
     const rewards = await p.textContent('.referral');
-    assert.match(rewards, /1 friend has booked/);
+    assert.match(rewards, /1 friend has come in/);
     assert.match(rewards, /current reward −5%/);
     await shot(p, '12-rewards-referral');
     await tab(p, 'Book');
@@ -245,7 +293,7 @@ async function run(n, browser) {
     await a.fill('#em-subject', 'The autumn edit'); await a.fill('#em-body', 'Bonjour {first},\n\nNew vouchers are live.');
     await a.click('button:has-text("Send email")');
     await a.waitForFunction(() => /email/.test(document.getElementById('toast').textContent), null, { timeout: 15000 });
-    assert.match(await a.textContent("#toast"), /1 of 1 email/); // only Julie confirmed her email
+    assert.match(await a.textContent("#toast"), /1 of 1 email/); // only Marie confirmed her email
     await a.click('.nav button:has-text("Push notifications")');
     await a.fill('#pu-title', 'Vouchers are live'); await a.fill('#pu-body', 'Trade your miles now.');
     await a.click('button:has-text("Send notification")');
@@ -255,6 +303,13 @@ async function run(n, browser) {
     const outbox = await a.textContent('table');
     assert.match(outbox, /The autumn edit/); assert.match(outbox, /Vouchers are live/); assert.match(outbox, /is your Seasonly code/);
     await shot(a, '14-admin-outbox');
+    await a.click('.nav button:has-text("Inbox")');
+    await a.waitForSelector('.msg-card');
+    const inbox = await a.textContent('.main');
+    assert.match(inbox, /When will my cleansing jelly ship\?/); assert.match(inbox, /night routine reminder/);
+    await a.fill('form[data-form="reply"] textarea', 'It ships tomorrow!');
+    await a.click('form[data-form="reply"] button');
+    await a.waitForFunction(() => /Reply sent/.test(document.getElementById('toast').textContent), null, { timeout: 15000 });
     await a.click('.nav button:has-text("Customers")');
     await a.waitForSelector('tbody tr');
     assert.match(await a.textContent('table'), /Julie/);
@@ -281,6 +336,14 @@ async function run(n, browser) {
     await d.fill('#code', await code(d));
     await d.waitForSelector('.stats');
     await d.click('.checkin-banner'); await d.waitForSelector('.celebrate'); await d.click('.celebrate .btn-dark');
+    await tab(d, 'Shop'); await d.click('.p-card .add-mini >> nth=0');
+    await d.click('.icon-btn[aria-label="Bag"]'); await d.click('[data-a="checkout"]');
+    await d.waitForSelector('text=Order received');
+    const demoBefore = (await d.textContent('.sheet-card')).match(/\+(\d+) Skin Miles once paid/)[1];
+    await d.click('[data-a="sim-pay"]');
+    await d.waitForSelector('.sheet-card :text("Skin Miles credited")');
+    assert.ok(Number(demoBefore) > 0);
+    await d.click('.sheet-card [data-a="close"]');
     await tab(d, 'Profile'); await d.click('[data-a="logout"]'); await d.click('[data-a="logout-ok"]');
     await d.waitForSelector('text=Create my account');
     step('offline demo mode ✓');
