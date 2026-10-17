@@ -10,6 +10,8 @@ const { openDb } = require('./db');
 const sec = require('./security');
 const images = require('./images');
 const { createNotifier } = require('./notify');
+const { createSkinAnalyzer } = require('./skin');
+const { tr, langOf, LANGS } = require('./i18n');
 
 const DAY = 864e5;
 const SESSION_DAYS = 30;
@@ -17,7 +19,7 @@ const OTP_TTL = 10 * 60 * 1000;
 const OTP_RESEND = 30 * 1000;
 const OTP_ATTEMPTS = 5;
 // Actions a signed-in user may run. Everything else (welcome bonus, referral credit, admin adjustments) is server-only.
-const USER_ACTIONS = new Set(['checkin', 'tip', 'ritualStep', 'ritualRestart', 'match', 'quiz', 'wheel', 'redeem', 'claim', 'checkout', 'book', 'cancel', 'profile', 'fav']);
+const USER_ACTIONS = new Set(['checkin', 'tip', 'ritualStart', 'ritualComplete', 'scan', 'match', 'quiz', 'wheel', 'redeem', 'claim', 'checkout', 'book', 'cancel', 'profile', 'fav']);
 // Booking times are Paris times.
 if (!process.env.TZ) process.env.TZ = 'Europe/Paris';
 const REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -47,6 +49,10 @@ function createApp(opts = {}) {
   const imageKey = opts.imageKey || loadKey(dataDir, env);
   const log = opts.log || console;
   const notifier = createNotifier(db, env, log);
+  const skinAnalyzer = opts.skinAnalyzer !== undefined ? opts.skinAnalyzer : createSkinAnalyzer(env, log);
+  const mediaDir = path.join(dataDir, 'media');
+  // Share of a ritual video that must have played before its miles are credited (0 to 1).
+  const watchShare = env.RITUAL_WATCH_SHARE !== undefined ? Math.min(1, Math.max(0, Number(env.RITUAL_WATCH_SHARE))) : Engine.WATCH_SHARE;
   const allow = sec.rateLimiter();
   const production = env.NODE_ENV === 'production';
   const showCodes = env.DEV_SHOW_CODES === '1' && !production;
@@ -63,7 +69,17 @@ function createApp(opts = {}) {
     const ins = db.prepare('INSERT INTO products (id, data, updated_at) VALUES (?, ?, ?)');
     db.tx(() => Catalog.PRODUCTS.forEach((p) => ins.run(p.id, JSON.stringify(p), Date.now())));
   }
+  // Products seeded before French descriptions existed get them from the catalog.
+  db.prepare('SELECT id, data FROM products').all().forEach((r) => {
+    const p = JSON.parse(r.data), c = Catalog.PRODUCTS.find((x) => x.id === r.id);
+    if (c && p.subFr === undefined) db.prepare('UPDATE products SET data = ? WHERE id = ?').run(JSON.stringify({ ...p, subFr: c.subFr, descFr: c.descFr, statsFr: c.statsFr }), r.id);
+  });
   if (!db.getSetting('referral')) db.setSetting('referral', Engine.DEFAULT_REFERRAL);
+  if (!db.getSetting('collabsSeeded')) {
+    const ins = db.prepare('INSERT INTO collabs (partner, kind, data, active, sort, created_at) VALUES (?, ?, ?, 1, ?, ?)');
+    Catalog.COLLABS.forEach((c, i) => ins.run(c.partner, c.kind, JSON.stringify(c.data(new Date())), i, Date.now()));
+    db.setSetting('collabsSeeded', true);
+  }
   const adminEmail = (env.ADMIN_EMAIL || 'admin@seasonly.fr').toLowerCase();
   let adminHash = null;
   if (env.ADMIN_PASSWORD) adminHash = sec.hashPassword(env.ADMIN_PASSWORD);
@@ -77,7 +93,8 @@ function createApp(opts = {}) {
   const stateOf = (u) => JSON.parse(u.state);
   const saveState = (id, state) => db.prepare('UPDATE users SET state = ?, first = ?, last = ? WHERE id = ?').run(JSON.stringify(state), state.profile.first, state.profile.last, id);
   const settings = () => ({ referral: db.getSetting('referral', Engine.DEFAULT_REFERRAL), hero: db.getSetting('hero', null) });
-  const ctxFor = () => ({ now: now(), products: products(), settings: settings(), codeFor: voucherCode });
+  const videoSecs = () => Object.fromEntries(Object.entries(db.getSetting('ritualVideos', {})).filter(([, x]) => x.secs).map(([id, x]) => [id, x.secs]));
+  const ctxFor = () => ({ now: now(), products: products(), settings: settings(), codeFor: voucherCode, watchShare, videoSecs: videoSecs() });
   const ip = (req) => req.ip || req.socket.remoteAddress || 'unknown';
 
   function voucherCode() {
@@ -98,7 +115,7 @@ function createApp(opts = {}) {
     const state = stateOf(u);
     return {
       id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, emailVerified: !!u.email_verified, phoneVerified: !!u.phone_verified, referralCode: u.referral_code,
-      hasAvatar: !!u.avatar_id, avatarVersion: u.avatar_id ? u.avatar_id.slice(0, 8) : null, state, address: addressOf(u),
+      hasAvatar: !!u.avatar_id, avatarVersion: u.avatar_id ? u.avatar_id.slice(0, 8) : null, state, address: addressOf(u), gender: u.gender, lang: u.lang,
       push: !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ?').get(u.id),
     };
   }
@@ -115,6 +132,8 @@ function createApp(opts = {}) {
     const row = t && db.prepare('SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?').get(sec.sha256(t), Date.now());
     const user = row && getUser(row.user_id);
     if (!user || !user.verified) return res.status(401).json({ error: 'Please sign in again.' });
+    // Emails and notifications follow the language the customer uses in the app.
+    if (req.lang && req.lang !== user.lang) { db.prepare('UPDATE users SET lang = ? WHERE id = ?').run(req.lang, user.id); user.lang = req.lang; }
     req.user = user; req.sessionHash = row.token_hash;
     next();
   }
@@ -141,10 +160,9 @@ function createApp(opts = {}) {
     return { id, codes };
   }
   async function deliverCode(user, codes) {
-    const text = (code) => `${code} is your Seasonly code. It expires in 10 minutes. Never share it — Seasonly will never ask you for it.`;
     const jobs = [];
-    if (codes.sms) jobs.push(notifier.sms(user.phone, `Seasonly: ${text(codes.sms)}`));
-    if (codes.email) jobs.push(notifier.email(user.email, `${codes.email} is your Seasonly code`, `Bonjour ${user.first},\n\n${text(codes.email)}\n\nIf you didn't ask for this code, you can ignore this email.`));
+    if (codes.sms) jobs.push(notifier.sms(user.phone, `Seasonly: ${tr('codeText', user.lang, codes.sms)}`));
+    if (codes.email) { const m = tr('codeEmail', user.lang, user.first, codes.email); jobs.push(notifier.email(user.email, m.subject, m.text)); }
     const results = await Promise.allSettled(jobs);
     if (results.every((r) => r.status === 'rejected')) bad('We could not send your code. Check your details or try the other option.', 502);
     if (production && results.every((r) => r.status === 'fulfilled' && !r.value.delivered)) bad('Code delivery is not configured yet. Contact Seasonly support.', 503);
@@ -176,14 +194,15 @@ function createApp(opts = {}) {
   app.use(sec.headers);
   const api = express.Router();
   api.use(sec.csrf);
-  api.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+  api.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); req.lang = LANGS.includes(req.get('X-Lang')) ? req.get('X-Lang') : null; next(); });
   const json = express.json({ limit: '64kb' });
   const raw = express.raw({ type: ['image/jpeg', 'image/png', 'application/octet-stream'], limit: images.MAX_BYTES });
 
   api.get('/health', (req, res) => res.json({ ok: true, mode: 'server' }));
   api.get('/config', (req, res) => {
     const s = settings();
-    res.json({ vapidPublicKey: notifier.vapidPublicKey, referral: s.referral, hero: s.hero ? `/api/images/${s.hero}` : null, channels: notifier.status });
+    res.json({ vapidPublicKey: notifier.vapidPublicKey, referral: s.referral, hero: s.hero ? `/api/images/${s.hero}` : null, channels: notifier.status,
+      scan: skinAnalyzer ? 'server' : 'device', ritualVideos: ritualVideos() });
   });
   api.get('/products', (req, res) => res.json({ products: products().map((p) => ({ ...p, image: p.imageId ? `/api/images/${p.imageId}` : null })) }));
   api.get('/images/:id', (req, res) => {
@@ -205,6 +224,7 @@ function createApp(opts = {}) {
     if (!phone) bad('Enter a valid mobile number, for example 06 12 34 56 78.');
     if (!SMS_PREFIXES.some((pre) => phone.startsWith(pre))) bad('For now we can only send codes to mobile numbers in France, Belgium, Switzerland, Luxembourg and Monaco.');
     const address = cleanAddress(b.address);
+    if (!Engine.GENDERS.includes(b.gender)) bad('Tell us how you identify: woman, man, other, or prefer not to say.');
     if (b.consent !== true) bad('Please accept the terms and privacy policy to continue.');
     if (!allow('send:' + phone, 5, 60 * 60 * 1000) || !allow('send:' + email, 5, 60 * 60 * 1000)) bad('Too many codes requested. Try again in an hour.', 429);
     let referredBy = null;
@@ -227,9 +247,9 @@ function createApp(opts = {}) {
       if (u.phone === phone && !u.phone_verified) { db.prepare('UPDATE users SET phone = NULL WHERE id = ?').run(u.id); s.profile.phone = ''; }
       saveState(u.id, s);
     }));
-    const state = Engine.newState({ first, last, email, phone, referredBy }, now());
-    const info = db.prepare('INSERT INTO users (first, last, email, phone, verified, referred_by, state, address, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)')
-      .run(first, last, email, phone, referredBy, JSON.stringify(state), JSON.stringify(address), Date.now());
+    const state = Engine.newState({ first, last, email, phone, referredBy, gender: b.gender }, now());
+    const info = db.prepare('INSERT INTO users (first, last, email, phone, verified, referred_by, state, address, gender, lang, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)')
+      .run(first, last, email, phone, referredBy, JSON.stringify(state), JSON.stringify(address), b.gender, langOf(req.lang), Date.now());
     const user = getUser(info.lastInsertRowid);
     const channel = channelOf(b.channel);
     const otp = await sendCode(user, 'signup', channel);
@@ -247,6 +267,7 @@ function createApp(opts = {}) {
       ? db.prepare('SELECT * FROM users WHERE email = ? AND verified = 1 AND email_verified = 1').get(email)
       : db.prepare('SELECT * FROM users WHERE phone = ? AND verified = 1 AND phone_verified = 1').get(phone);
     const channel = email ? 'email' : 'sms';
+    if (user && req.lang && req.lang !== user.lang) { db.prepare('UPDATE users SET lang = ? WHERE id = ?').run(req.lang, user.id); user.lang = req.lang; }
     if (!user) {
       return res.json({ pending: sec.token(18), channel, sentTo: email ? { email: sec.maskEmail(email) } : { sms: sec.maskPhone(phone) } });
     }
@@ -298,7 +319,7 @@ function createApp(opts = {}) {
         db.prepare('UPDATE users SET verified = 1, referral_code = ?, state = ? WHERE id = ?').run(code, JSON.stringify(state), user.id);
       });
       user = getUser(user.id);
-      if (user.email_verified) notifier.email(user.email, 'Welcome to Seasonly', `Bonjour ${user.first},\n\nYour account is confirmed and 300 Skin Miles are waiting for you.\n\nYour referral code is ${user.referral_code}. Share it: your friends get ${settings().referral.welcome}% off their first Face Glow Bar treatment, and you earn ${settings().referral.perFriend}% off your next booking for each friend who books (up to ${settings().referral.cap}%).`).catch(() => {});
+      if (user.email_verified) { const m = tr('welcome', user.lang, user.first, user.referral_code, settings().referral); notifier.email(user.email, m.subject, m.text).catch(() => {}); }
     }
     startSession(res, user.id);
     res.json({ user: publicUser(user), isNew: row.purpose === 'signup' });
@@ -353,16 +374,33 @@ function createApp(opts = {}) {
     });
     after.forEach(({ kind, referrer, discount, friend }) => {
       if (kind !== 'referralQualified') return;
-      notifier.push([referrer.id], { title: 'Your friend came to Seasonly 🎉', body: `${friend} enjoyed a Face Glow Bar treatment. You now have ${discount}% off your next booking.`, url: '/#book' }).catch(() => {});
-      mailTo(referrer, `${friend} came for a treatment — your reward is ready`, `Bonjour ${referrer.first},\n\n${friend} confirmed their Seasonly account and paid for a treatment with your code.\n\nYou now have ${discount}% off your next Face Glow Bar booking, plus 200 Skin Miles.`);
+      notifier.push([referrer.id], { ...tr('referralPush', referrer.lang, friend, discount), url: '/#book' }).catch(() => {});
+      mailMsg(referrer, tr('referralEmail', referrer.lang, referrer.first, friend, discount));
     });
     return { out, user: getUser(userId) };
   }
   // Emails only ever go to an address the customer confirmed.
   const mailTo = (u, subject, text) => { if (u && u.email && u.email_verified) notifier.email(u.email, subject, text).catch(() => {}); };
+  const mailMsg = (u, m) => mailTo(u, m.subject, m.text);
   const mapsLink = (addr) => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}&travelmode=transit`;
   const fmtWhen = (b) => `${new Date(b.startAt).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} at ${b.slot}`;
-  const eurTxt = (n) => `€${Number(n).toFixed(2).replace('.00', '')}`;
+  /* Push in each customer's language: groups the recipients by language. */
+  async function pushLocal(target, make) {
+    const rows = target === 'all'
+      ? db.prepare('SELECT DISTINCT u.id, u.lang FROM push_subs s JOIN users u ON u.id = s.user_id').all()
+      : target.length ? db.prepare(`SELECT id, lang FROM users WHERE id IN (${target.map(() => '?').join(',')})`).all(...target) : [];
+    const total = { subscriptions: 0, sent: 0, failed: 0 };
+    let calls = 0;
+    for (const lang of LANGS) {
+      const ids = rows.filter((r) => langOf(r.lang) === lang).map((r) => r.id);
+      if (!ids.length) continue;
+      const r = await notifier.push(ids, make(lang)); calls++;
+      total.subscriptions += r.subscriptions; total.sent += r.sent; total.failed += r.failed;
+    }
+    // Nobody to reach: still recorded in the outbox, so the admin sees it was sent.
+    if (!calls) return notifier.push(target === 'all' ? 'all' : [], make('fr'));
+    return total;
+  }
 
   api.post('/actions', auth, json, wrap(async (req, res) => {
     if (!allow('act:' + req.user.id, 120, 60 * 1000)) bad('Slow down a little and try again.', 429);
@@ -370,20 +408,14 @@ function createApp(opts = {}) {
     if (!USER_ACTIONS.has(type)) bad('Unknown action.');
     const { out, user } = runAction(req.user.id, type, req.body.payload);
     const r = out.result || {};
-    if (type === 'book' && r.booking) {
-      const b = r.booking;
-      mailTo(user, `Your ${b.service} is booked`, `Bonjour ${user.first},\n\nYour treatment is booked.\n\n${b.service} · ${b.mins} min\n${fmtWhen(b)}\n${b.studio}\n${b.addr}\n\nPrice: ${eurTxt(b.price)}, paid at the Face Glow Bar. You'll earn ${b.miles} Skin Miles once it's paid.\nReference: ${b.id}\n\nDirections: ${mapsLink(b.addr)}\n\nWe'll send you a reminder one hour before. Need to change something? Cancel from your profile in the app.`);
-    }
-    if (type === 'checkout' && r.order) {
-      const o = r.order;
-      mailTo(user, `We received your order ${o.id}`, `Bonjour ${user.first},\n\nThank you for your order.\n\n${o.lines.map((l) => `${l.qty} × ${l.name} — ${eurTxt(l.price * l.qty)}`).join('\n')}\nTotal: ${eurTxt(o.total)}\n\nYou'll earn ${o.miles} Skin Miles as soon as your payment is confirmed.`);
-    }
+    if (type === 'book' && r.booking) mailMsg(user, tr('booked', user.lang, user.first, r.booking, mapsLink(r.booking.addr)));
+    if (type === 'checkout' && r.order) mailMsg(user, tr('ordered', user.lang, user.first, r.order));
     if (type === 'cancel' && r.item) {
       const it = r.item, what = it.service ? `${it.service} on ${fmtWhen(it)}` : `order ${it.id}`;
       if (it.status === 'refund_requested') {
         notifier.email(env.SUPPORT_EMAIL || 'hello@seasonly.fr', `Refund requested: ${it.id}`, `${user.first} ${user.last} (${user.email || user.phone}) asked for a refund of ${what}. Process it in the admin panel.`).catch(() => {});
-        mailTo(user, 'We received your refund request', `Bonjour ${user.first},\n\nWe received your request to refund ${what}. Our team will process it shortly. The Skin Miles earned with it will be deducted once the refund is made.`);
-      } else mailTo(user, 'Your cancellation is confirmed', `Bonjour ${user.first},\n\n${what[0].toUpperCase() + what.slice(1)} is cancelled. Any voucher or referral discount you used is available again.`);
+        mailMsg(user, tr('refundRequested', user.lang, user.first, it));
+      } else mailMsg(user, tr('cancelled', user.lang, user.first, it));
     }
     res.json({ state: out.state, events: out.events.filter((e) => !e.type.startsWith('referral')), result: out.result });
   }));
@@ -404,7 +436,7 @@ function createApp(opts = {}) {
     return u && u.verified ? u : null;
   };
   const contestView = (c, userId) => ({
-    id: c.id, title: c.title, period: c.period, description: c.description, prizeKind: c.prize_kind, prizeLabel: c.prize_label, winners: c.winners,
+    id: c.id, title: c.title, period: c.period, description: c.description, titleEn: c.title_en || '', descriptionEn: c.description_en || '', prizeKind: c.prize_kind, prizeLabel: c.prize_label, winners: c.winners,
     startsAt: c.starts_at, endsAt: c.ends_at, status: c.status,
     entries: db.prepare('SELECT COUNT(*) AS n FROM contest_entries WHERE contest_id = ?').get(c.id).n,
     entered: !!(userId && db.prepare('SELECT 1 FROM contest_entries WHERE contest_id = ? AND user_id = ?').get(c.id, userId)),
@@ -426,15 +458,18 @@ function createApp(opts = {}) {
   const giftView = (g, state) => {
     let status = g.status;
     if (g.kind === 'soin' && g.code) { const v = state.vouchers.find((x) => x.code === g.code); if (v && v.used) status = 'used'; else if (v && v.expires < Date.now()) status = 'expired'; }
-    return { id: g.id, kind: g.kind, label: g.label, source: g.source, note: g.note, status, code: g.code, address: g.address ? JSON.parse(g.address) : null, createdAt: g.created_at, shippedAt: g.shipped_at };
+    const m = /^contest:(\d+)$/.exec(g.source || '');
+    const c = m && db.prepare('SELECT title, title_en FROM contests WHERE id = ?').get(Number(m[1]));
+    return { id: g.id, kind: g.kind, label: g.label, source: m ? '' : g.source, contest: c ? { fr: c.title, en: c.title_en || c.title } : null, note: g.note, status, code: g.code, address: g.address ? JSON.parse(g.address) : null, createdAt: g.created_at, shippedAt: g.shipped_at };
   };
   api.get('/me/gifts', auth, (req, res) => {
     const st = stateOf(req.user);
     res.json({ gifts: db.prepare('SELECT * FROM gifts WHERE user_id = ? ORDER BY id DESC').all(req.user.id).map((g) => giftView(g, st)) });
   });
   /* Give a soin (free-treatment voucher, usable when booking) or a product (shipped to the saved address). */
-  function giveGift(userId, { kind, ref, source, note }) {
+  function giveGift(userId, { kind, ref, source, contestId, note }) {
     let gift;
+    if (contestId) source = `contest:${contestId}`;
     db.tx(() => {
       const u = getUser(userId) || bad('Customer not found.', 404);
       let label, code = null;
@@ -443,7 +478,7 @@ function createApp(opts = {}) {
         label = `${sv.name} · ${sv.mins} min`;
         code = 'GIFT-' + Array.from(crypto.randomBytes(6), (b) => REF_ALPHABET[b % REF_ALPHABET.length]).join('');
         const s = stateOf(u);
-        s.vouchers.unshift({ id: `gift-${sv.id}`, season: Engine.seasonOf(now()).id, kind: 'service', title: `Gift · Free ${sv.name}`, note: source, cost: 0, value: 100, type: 'percent', code, used: false, expires: Date.now() + 180 * 864e5, gift: true });
+        s.vouchers.unshift({ id: `gift-${sv.id}`, season: Engine.seasonOf(now()).id, kind: 'service', title: `Gift · Free ${sv.name}`, note: contestId ? 'Contest prize' : source, cost: 0, value: 100, type: 'percent', code, used: false, expires: Date.now() + 180 * 864e5, gift: true });
         saveState(u.id, s);
       } else if (kind === 'product') {
         const p = products(true).find((x) => x.id === ref) || bad('Choose a product.');
@@ -455,8 +490,10 @@ function createApp(opts = {}) {
       gift = { id: info.lastInsertRowid, user: u, label, kind, code };
     });
     const u = gift.user;
-    notifier.push([u.id], { title: 'A gift from Seasonly 🎁', body: `${gift.label} is waiting for you in your profile.`, url: '/#gifts' }).catch(() => {});
-    mailTo(u, `A gift for you: ${gift.label}`, `Bonjour ${u.first},\n\n${source}: ${gift.label} is yours.\n\n${gift.kind === 'soin' ? `Book it in the app: your free-treatment voucher ${gift.code} is applied at the confirm step. It's valid for 6 months.` : 'We will ship it to the address saved in your profile. Check it is up to date.'}`);
+    const ct = contestId && db.prepare('SELECT title, title_en FROM contests WHERE id = ?').get(contestId);
+    const from = tr('giftSource', u.lang, ct ? { contest: u.lang === 'en' ? ct.title_en || ct.title : ct.title } : { text: source });
+    notifier.push([u.id], { ...tr('giftPush', u.lang, gift.label), url: '/#gifts' }).catch(() => {});
+    mailMsg(u, tr('giftEmail', u.lang, u.first, from, gift));
     return gift;
   }
 
@@ -471,7 +508,7 @@ function createApp(opts = {}) {
     const info = db.prepare("INSERT INTO messages (user_id, kind, topic, ref, body, status, created_at) VALUES (?, 'support', ?, ?, ?, 'open', ?)").run(req.user.id, topic, ref || null, body, Date.now());
     const u = req.user;
     notifier.email(env.SUPPORT_EMAIL || 'hello@seasonly.fr', `[Support #${info.lastInsertRowid}] ${topic}${ref ? ` · ${ref}` : ''}`, `From ${u.first} ${u.last} (${u.email || '—'} · ${u.phone || '—'})\n\n${body}`).catch(() => {});
-    mailTo(u, `We received your message (#${info.lastInsertRowid})`, `Bonjour ${u.first},\n\nThank you for contacting Seasonly. We usually answer within one working day. You'll find our reply in the app and in your inbox.\n\nYour message:\n${body}`);
+    mailMsg(u, tr('supportReceived', u.lang, u.first, info.lastInsertRowid, body));
     res.status(201).json({ id: info.lastInsertRowid });
   }));
   api.post('/feedback', auth, json, wrap(async (req, res) => {
@@ -531,10 +568,76 @@ function createApp(opts = {}) {
     res.json({ ok: true });
   });
 
+  /* ---------- Skin scan ---------- */
+  // The photo is analysed and forgotten: it is never written to disk or to the database.
+  api.post('/skin-scan', auth, raw, wrap(async (req, res) => {
+    if (!skinAnalyzer) bad('Skin scan runs on your phone.', 501);
+    if (!allow('scan:' + req.user.id, 6, DAY)) bad('You scanned your skin several times today. Come back tomorrow.', 429);
+    const { mime, data } = images.clean(req.body);
+    if (mime !== 'image/jpeg') bad('Send a JPEG photo.');
+    let scan;
+    try { scan = await skinAnalyzer(data, { lang: req.user.lang, products: products() }); }
+    catch (e) { log.warn?.(`[skin-scan] ${e.code || e.status || ''} ${e.message}`); bad('The scan did not work this time. Try again in better light.', 502); }
+    if (!scan.face) return res.json({ scan });
+    // Only products and rituals that exist, and scores in range.
+    const ids = new Set(products().map((p) => p.id));
+    scan.products = (Array.isArray(scan.products) ? scan.products : []).filter((id) => ids.has(id)).slice(0, 2);
+    if (!Engine.RITUALS.some((r) => r.id === scan.ritual)) scan.ritual = Engine.RITUALS[0].id;
+    scan.scores = Object.fromEntries(Engine.SCAN_KEYS.map((k) => [k, Math.max(0, Math.min(100, Math.round(Number((scan.scores || {})[k]) || 60)))]));
+    scan.tips = (Array.isArray(scan.tips) ? scan.tips : []).map((x) => String(x).slice(0, 240)).slice(0, 3);
+    const { out } = runAction(req.user.id, 'scan', { scores: scan.scores, skinType: scan.skinType });
+    res.json({ scan, state: out.state, events: out.events, result: out.result });
+  }));
+
+  /* ---------- Collabs: brand collaborations and events ---------- */
+  const collabView = (c, userId) => {
+    const d = JSON.parse(c.data);
+    const regs = db.prepare('SELECT COUNT(*) AS n FROM collab_regs WHERE collab_id = ?').get(c.id).n;
+    return { id: c.id, partner: c.partner, kind: c.kind, ...d, image: c.image_id ? `/api/images/${c.image_id}` : null, active: !!c.active, sort: c.sort,
+      registrations: regs, full: !!(d.capacity && regs >= d.capacity),
+      registered: !!(userId && db.prepare('SELECT 1 FROM collab_regs WHERE collab_id = ? AND user_id = ?').get(c.id, userId)) };
+  };
+  api.get('/collabs', (req, res) => {
+    const u = optionalUser(req);
+    res.json({ collabs: db.prepare('SELECT * FROM collabs WHERE active = 1 ORDER BY sort, id').all().map((c) => collabView(c, u && u.id))
+      .filter((c) => !c.endsAt || c.endsAt > Date.now()) });
+  });
+  api.post('/collabs/:id/join', auth, (req, res) => {
+    const c = db.prepare('SELECT * FROM collabs WHERE id = ? AND active = 1').get(Number(req.params.id)) || bad('This collaboration has ended.', 404);
+    const v = collabView(c, req.user.id);
+    if (!v.rsvp) bad('No registration is needed for this one.');
+    if (v.endsAt && v.endsAt < Date.now()) bad('This collaboration has ended.', 422);
+    if (!v.registered && v.full) bad('This event is full. We will tell you about the next one.', 422);
+    if (!v.registered) {
+      db.prepare('INSERT OR IGNORE INTO collab_regs (collab_id, user_id, created_at) VALUES (?, ?, ?)').run(c.id, req.user.id, Date.now());
+      const t = v[langOf(req.user.lang)] || v.fr;
+      mailMsg(req.user, tr('collabJoined', req.user.lang, req.user.first, { title: t.title, when: t.when, place: v.place }));
+    }
+    res.json({ collab: collabView(c, req.user.id) });
+  });
+  api.delete('/collabs/:id/join', auth, (req, res) => {
+    db.prepare('DELETE FROM collab_regs WHERE collab_id = ? AND user_id = ?').run(Number(req.params.id), req.user.id);
+    const c = db.prepare('SELECT * FROM collabs WHERE id = ?').get(Number(req.params.id)) || bad('Not found.', 404);
+    res.json({ collab: collabView(c, req.user.id) });
+  });
+
+  /* ---------- Ritual videos uploaded in the admin panel ---------- */
+  const VIDEO_TYPES = { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' };
+  const ritualVideos = () => {
+    const v = db.getSetting('ritualVideos', {});
+    return Object.fromEntries(Object.entries(v).map(([id, x]) => [id, `/api/media/${x.file}?v=${x.v}`]));
+  };
+  api.get('/media/:file', (req, res) => {
+    const name = String(req.params.file);
+    if (!/^ritual-[a-z0-9-]{2,30}\.(mp4|webm|mov)$/.test(name) || !fs.existsSync(path.join(mediaDir, name))) return res.status(404).end();
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.sendFile(name, { root: mediaDir, dotfiles: 'deny' });
+  });
+
   /* ---------- Admin ---------- */
   const admin = express.Router();
   admin.post('/login', json, (req, res) => {
-    if (!allow('admin:' + ip(req), 10, 15 * 60 * 1000)) bad('Too many attempts. Wait 15 minutes.', 429);
+    if (!allow('admin:' + ip(req), Number(env.ADMIN_LOGIN_PER_IP) || 10, 15 * 60 * 1000)) bad('Too many attempts. Wait 15 minutes.', 429);
     const b = req.body || {};
     if (!adminHash) bad('Set ADMIN_PASSWORD on the server to enable the admin panel.', 503);
     const okEmail = sec.safeEqual(String(b.email || '').trim().toLowerCase(), adminEmail);
@@ -577,7 +680,7 @@ function createApp(opts = {}) {
     const str = (v, n) => String(v ?? '').trim().slice(0, n);
     if (b.name !== undefined) p.name = str(b.name, 80);
     if (!p.name) bad('Give the product a name.');
-    for (const [k, n] of [['sub', 120], ['desc', 2000], ['size', 30], ['cat', 30], ['badge', 20]]) if (b[k] !== undefined) p[k] = str(b[k], n);
+    for (const [k, n] of [['sub', 120], ['desc', 2000], ['subFr', 120], ['descFr', 2000], ['size', 30], ['cat', 30], ['badge', 20]]) if (b[k] !== undefined) p[k] = str(b[k], n);
     if (b.price !== undefined) { p.price = Math.round(Number(b.price) * 100) / 100; if (!(p.price > 0 && p.price < 10000)) bad('Enter a price above €0.'); }
     if (b.compareAt !== undefined) p.compareAt = b.compareAt === '' || b.compareAt === null ? null : Math.round(Number(b.compareAt) * 100) / 100;
     if (b.active !== undefined) p.active = !!b.active;
@@ -639,7 +742,7 @@ function createApp(opts = {}) {
     res.json({ users: rows.map((u) => { const s = stateOf(u); return {
       id: u.id, first: u.first, last: u.last, email: u.email, phone: u.phone, verified: !!u.verified, referralCode: u.referral_code, referredBy: u.referred_by,
       miles: s.miles, lifetime: s.lifetime, tier: Engine.tierOf(s.lifetime).name, streak: s.streak, bookings: s.bookings.length, orders: s.orders.length,
-      friends: s.referral.friends, createdAt: u.created_at, lastLogin: u.last_login, address: addressOf(u),
+      friends: s.referral.friends, createdAt: u.created_at, lastLogin: u.last_login, address: addressOf(u), gender: u.gender, lang: u.lang,
       push: !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ?').get(u.id) }; }) });
   });
   admin.post('/users/:id/miles', json, (req, res) => {
@@ -665,13 +768,14 @@ function createApp(opts = {}) {
   admin.post('/:kind(orders|bookings)/:userId/:id/:op(pay|refund)', (req, res) => {
     const kind = req.params.kind === 'orders' ? 'order' : 'booking';
     const { out, user } = runAction(Number(req.params.userId), req.params.op, { kind, id: req.params.id });
-    const it = out.result.item, what = kind === 'order' ? `order ${it.id}` : `${it.service} on ${fmtWhen(it)}`;
+    const it = out.result.item;
+    const amount = kind === 'order' ? it.total : it.price;
     if (req.params.op === 'pay') {
-      notifier.push([user.id], { title: `+${it.credited} Skin Miles`, body: `Thank you! Your ${kind === 'order' ? 'order' : 'treatment'} is paid and your miles are credited.`, url: '/#profile' }).catch(() => {});
-      mailTo(user, `Payment received — +${it.credited} Skin Miles`, `Bonjour ${user.first},\n\nWe received your payment for ${what} (${eurTxt(kind === 'order' ? it.total : it.price)}).\n\n${it.credited} Skin Miles are now in your account.`);
+      notifier.push([user.id], { ...tr('paidPush', user.lang, it, kind), url: '/#profile' }).catch(() => {});
+      mailMsg(user, tr('paidEmail', user.lang, user.first, it, amount));
     } else {
-      notifier.push([user.id], { title: 'Refund made', body: `Your refund for ${what} is done. ${it.credited} Skin Miles were deducted.`, url: '/#profile' }).catch(() => {});
-      mailTo(user, 'Your refund is done', `Bonjour ${user.first},\n\nWe refunded ${what} (${eurTxt(kind === 'order' ? it.total : it.price)}). The ${it.credited} Skin Miles earned with this payment were deducted from your balance.`);
+      notifier.push([user.id], { ...tr('refundPush', user.lang, it), url: '/#profile' }).catch(() => {});
+      mailMsg(user, tr('refundEmail', user.lang, user.first, it, amount));
     }
     res.json({ item: it });
   });
@@ -692,13 +796,14 @@ function createApp(opts = {}) {
     const kind = b.prizeKind === 'product' ? 'product' : 'soin';
     const ref = String(b.prizeRef || '');
     const label = kind === 'soin' ? ((Engine.SERVICES.find((x) => x.id === ref) || bad('Choose a treatment.')).name) : ((products(true).find((x) => x.id === ref) || bad('Choose a product.')).name);
-    const title = String(b.title || '').trim().slice(0, 80) || `Win a ${label}`;
+    const title = String(b.title || '').trim().slice(0, 80) || `Gagnez un ${label}`;
+    const titleEn = String(b.titleEn || '').trim().slice(0, 80) || (String(b.title || '').trim() ? '' : `Win a ${label}`);
     const winners = Math.min(20, Math.max(1, Math.round(Number(b.winners) || 1)));
     const endsAt = b.endsAt ? new Date(b.endsAt).getTime() : periodEnd(period);
     if (!(endsAt > Date.now())) bad('The end date must be in the future.');
-    const info = db.prepare("INSERT INTO contests (title, period, description, prize_kind, prize_ref, prize_label, winners, starts_at, ends_at, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)")
-      .run(title, period, String(b.description || '').trim().slice(0, 600), kind, ref, label, winners, Date.now(), endsAt, Date.now());
-    if (b.announce) notifier.push('all', { title: `New ${PERIODS[period].toLowerCase()} 🎁`, body: `${title}. Enter in the Rewards tab.`, url: '/#contests' }).catch(() => {});
+    const info = db.prepare("INSERT INTO contests (title, period, description, prize_kind, prize_ref, prize_label, winners, starts_at, ends_at, status, created_at, title_en, description_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)")
+      .run(title, period, String(b.description || '').trim().slice(0, 600), kind, ref, label, winners, Date.now(), endsAt, Date.now(), titleEn, String(b.descriptionEn || '').trim().slice(0, 600));
+    if (b.announce) pushLocal('all', (lang) => ({ ...tr('contestPush', lang, period, lang === 'en' ? titleEn || title : title), url: '/#contests' })).catch(() => {});
     res.status(201).json({ contest: contestView(db.prepare('SELECT * FROM contests WHERE id = ?').get(info.lastInsertRowid), null) });
   });
   admin.post('/contests/:id/draw', (req, res) => {
@@ -707,10 +812,10 @@ function createApp(opts = {}) {
     const entrants = db.prepare('SELECT user_id FROM contest_entries WHERE contest_id = ?').all(c.id).map((r) => r.user_id).filter((id) => { const u = getUser(id); return u && u.verified; });
     if (!entrants.length) bad('Nobody entered this contest yet.');
     // Fair draw with a cryptographic random generator.
-    const pool = [...entrants], winners = [];
-    while (winners.length < Math.min(c.winners, pool.length)) winners.push(pool.splice(crypto.randomInt(pool.length), 1)[0]);
+    const pool = [...entrants], winners = [], count = Math.min(c.winners, pool.length);
+    while (winners.length < count) winners.push(pool.splice(crypto.randomInt(pool.length), 1)[0]);
     db.prepare("UPDATE contests SET status = 'drawn', winner_ids = ? WHERE id = ?").run(JSON.stringify(winners), c.id);
-    winners.forEach((id) => giveGift(id, { kind: c.prize_kind, ref: c.prize_ref, source: `You won "${c.title}"` }));
+    winners.forEach((id) => giveGift(id, { kind: c.prize_kind, ref: c.prize_ref, contestId: c.id }));
     res.json({ contest: contestView(db.prepare('SELECT * FROM contests WHERE id = ?').get(c.id), null), winners: winners.map((id) => { const u = getUser(id); return { id, name: `${u.first} ${u.last}`.trim(), email: u.email }; }) });
   });
   admin.post('/contests/:id/close', (req, res) => {
@@ -734,7 +839,7 @@ function createApp(opts = {}) {
     if (g.kind !== 'product' || g.status !== 'to_ship') bad('Only product gifts waiting to ship can be marked as shipped.');
     db.prepare("UPDATE gifts SET status = 'shipped', shipped_at = ? WHERE id = ?").run(Date.now(), g.id);
     const u = getUser(g.user_id);
-    if (u) { notifier.push([u.id], { title: 'Your gift is on its way', body: `${g.label} has been shipped.`, url: '/#gifts' }).catch(() => {}); mailTo(u, 'Your gift is on its way', `Bonjour ${u.first},\n\n${g.label} has been shipped to:\n${JSON.parse(g.address).line1}, ${JSON.parse(g.address).postcode} ${JSON.parse(g.address).city}`); }
+    if (u) { notifier.push([u.id], { ...tr('shippedPush', u.lang, g.label), url: '/#gifts' }).catch(() => {}); mailMsg(u, tr('shippedEmail', u.lang, u.first, g.label, JSON.parse(g.address))); }
     res.json({ ok: true });
   });
 
@@ -750,8 +855,8 @@ function createApp(opts = {}) {
     db.prepare("UPDATE messages SET reply = ?, replied_at = ?, status = 'resolved' WHERE id = ?").run(body, Date.now(), m.id);
     const u = m.user_id && getUser(m.user_id);
     if (u) {
-      mailTo(u, `Seasonly support — your message #${m.id}`, `Bonjour ${u.first},\n\n${body}\n\n— The Seasonly team`);
-      notifier.push([u.id], { title: 'Seasonly support replied', body: body.slice(0, 120), url: '/#support' }).catch(() => {});
+      mailMsg(u, tr('supportReply', u.lang, u.first, m.id, body));
+      notifier.push([u.id], { ...tr('supportReplyPush', u.lang, body), url: '/#support' }).catch(() => {});
     }
     res.json({ ok: true });
   });
@@ -779,12 +884,16 @@ function createApp(opts = {}) {
     const b = req.body || {};
     const subject = String(b.subject || '').trim().slice(0, 150), body = String(b.body || '').trim().slice(0, 10000);
     if (!subject || !body) bad('Write a subject and a message.');
+    // Optional English version for customers who use the app in English.
+    const subjectEn = String(b.subjectEn || '').trim().slice(0, 150), bodyEn = String(b.bodyEn || '').trim().slice(0, 10000);
+    const version = (u) => (u.lang === 'en' && subjectEn && bodyEn ? [subjectEn, bodyEn] : [subject, body]);
     // Never email an address the customer didn't confirm.
     const list = audience(b).filter((u) => u.email && u.email_verified);
     if (b.audience === 'one' && !list.length) bad('No confirmed customer with that email.');
     let sent = 0, failed = 0;
     for (const u of list) {
-      try { await notifier.email(u.email, subject, body.replace(/\{first\}/g, u.first)); sent++; } catch { failed++; }
+      const [sj, bd] = version(u);
+      try { await notifier.email(u.email, sj, bd.replace(/\{first\}/g, u.first)); sent++; } catch { failed++; }
     }
     res.json({ recipients: list.length, sent, failed, delivered: notifier.status.email });
   }));
@@ -793,8 +902,9 @@ function createApp(opts = {}) {
     const title = String(b.title || '').trim().slice(0, 80), body = String(b.body || '').trim().slice(0, 240);
     const url = /^\/[\w\-/#?=&.]*$/.test(b.url || '') ? b.url : '/';
     if (!title || !body) bad('Write a title and a message.');
+    const titleEn = String(b.titleEn || '').trim().slice(0, 80), bodyEn = String(b.bodyEn || '').trim().slice(0, 240);
     const target = b.audience === 'all' ? 'all' : audience(b).map((u) => u.id);
-    res.json(await notifier.push(target, { title, body, url }));
+    res.json(await pushLocal(target, (lang) => (lang === 'en' && titleEn && bodyEn ? { title: titleEn, body: bodyEn, url } : { title, body, url })));
   }));
   admin.get('/outbox', (req, res) => res.json({ outbox: db.prepare('SELECT * FROM outbox ORDER BY id DESC LIMIT 200').all() }));
 
@@ -819,6 +929,77 @@ function createApp(opts = {}) {
     res.json({ hero: null });
   });
 
+  /* Collabs */
+  const cleanCollab = (b) => {
+    const str = (v, n) => String(v ?? '').trim().slice(0, n);
+    const partner = str(b.partner, 60) || bad('Name the partner brand or event.');
+    const kind = b.kind === 'event' ? 'event' : 'brand';
+    const lang = (x = {}) => ({ title: str(x.title, 90), subtitle: str(x.subtitle, 140), body: str(x.body, 1500), cta: str(x.cta, 30), when: str(x.when, 80), offer: str(x.offer, 140) });
+    const fr = lang(b.fr), en = lang(b.en);
+    if (!fr.title && !en.title) bad('Give the collaboration a title.');
+    const time = (v) => (v ? new Date(v).getTime() || null : null);
+    const link = str(b.link, 300);
+    if (link && !/^https:\/\//.test(link)) bad('The link must start with https://');
+    return { partner, kind, data: { fr: fr.title ? fr : en, en: en.title ? en : fr, code: str(b.code, 30).toUpperCase(), link, place: str(b.place, 140), color: /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#C4806C',
+      rsvp: !!b.rsvp, capacity: Math.max(0, Math.round(Number(b.capacity) || 0)), eventAt: time(b.eventAt), endsAt: time(b.endsAt) } };
+  };
+  admin.get('/collabs', (req, res) => {
+    res.json({ collabs: db.prepare('SELECT * FROM collabs ORDER BY sort, id').all().map((c) => ({ ...collabView(c, null),
+      attendees: db.prepare('SELECT u.first, u.last, u.email, u.phone, r.created_at FROM collab_regs r JOIN users u ON u.id = r.user_id WHERE r.collab_id = ? ORDER BY r.created_at').all(c.id) })) });
+  });
+  admin.post('/collabs', json, (req, res) => {
+    const c = cleanCollab(req.body || {});
+    const info = db.prepare('INSERT INTO collabs (partner, kind, data, active, sort, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(c.partner, c.kind, JSON.stringify(c.data), req.body.active === false ? 0 : 1, Math.floor(Number(req.body.sort)) || 0, Date.now());
+    res.status(201).json({ collab: collabView(db.prepare('SELECT * FROM collabs WHERE id = ?').get(info.lastInsertRowid), null) });
+  });
+  admin.put('/collabs/:id', json, (req, res) => {
+    const row = db.prepare('SELECT * FROM collabs WHERE id = ?').get(Number(req.params.id)) || bad('Not found.', 404);
+    const c = cleanCollab(req.body || {});
+    db.prepare('UPDATE collabs SET partner = ?, kind = ?, data = ?, active = ?, sort = ? WHERE id = ?').run(c.partner, c.kind, JSON.stringify(c.data), req.body.active === false ? 0 : 1, Math.floor(Number(req.body.sort)) || 0, row.id);
+    res.json({ collab: collabView(db.prepare('SELECT * FROM collabs WHERE id = ?').get(row.id), null) });
+  });
+  admin.delete('/collabs/:id', (req, res) => {
+    const row = db.prepare('SELECT * FROM collabs WHERE id = ?').get(Number(req.params.id)) || bad('Not found.', 404);
+    db.tx(() => { if (row.image_id) db.prepare('DELETE FROM images WHERE id = ?').run(row.image_id); db.prepare('DELETE FROM collabs WHERE id = ?').run(row.id); });
+    res.json({ ok: true });
+  });
+  admin.post('/collabs/:id/image', raw, (req, res) => {
+    const row = db.prepare('SELECT * FROM collabs WHERE id = ?').get(Number(req.params.id)) || bad('Not found.', 404);
+    const id = publicImage(req.body, `collab:${row.id}`);
+    db.tx(() => { if (row.image_id) db.prepare('DELETE FROM images WHERE id = ?').run(row.image_id); db.prepare('UPDATE collabs SET image_id = ? WHERE id = ?').run(id, row.id); });
+    res.json({ collab: collabView(db.prepare('SELECT * FROM collabs WHERE id = ?').get(row.id), null) });
+  });
+
+  /* Ritual videos: an uploaded video replaces the animated guide for that ritual. */
+  const rawVideo = express.raw({ type: Object.keys(VIDEO_TYPES), limit: '150mb' });
+  admin.get('/rituals', (req, res) => {
+    const v = ritualVideos();
+    res.json({ rituals: Engine.RITUALS.map((r) => ({ id: r.id, name: r.name, steps: r.steps.length, secs: Engine.ritualSecs(r), video: v[r.id] || null })) });
+  });
+  admin.post('/rituals/:id/video', rawVideo, (req, res) => {
+    const r = Engine.RITUALS.find((x) => x.id === req.params.id) || bad('Unknown ritual.', 404);
+    const type = (req.get('Content-Type') || '').split(';')[0];
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    // Check the bytes, not just the declared type: MP4/MOV have "ftyp" at offset 4, WebM starts with the EBML header.
+    const ok = VIDEO_TYPES[type] && buf.length > 1000 && (type === 'video/webm' ? buf.readUInt32BE(0) === 0x1a45dfa3 : buf.toString('latin1', 4, 8) === 'ftyp');
+    if (!ok) bad('Upload an MP4, MOV or WebM video.');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    const all = db.getSetting('ritualVideos', {});
+    if (all[r.id]) fs.rmSync(path.join(mediaDir, all[r.id].file), { force: true });
+    const file = `ritual-${r.id}.${VIDEO_TYPES[type]}`;
+    fs.writeFileSync(path.join(mediaDir, file), buf);
+    // Length in seconds, read by the admin panel from the file, so completion checks the right watch time.
+    const secs = Math.round(Number(req.get('X-Duration')));
+    all[r.id] = { file, v: Date.now().toString(36), secs: secs > 5 && secs < 3600 ? secs : null };
+    db.setSetting('ritualVideos', all);
+    res.json({ video: ritualVideos()[r.id] });
+  });
+  admin.delete('/rituals/:id/video', (req, res) => {
+    const all = db.getSetting('ritualVideos', {});
+    if (all[req.params.id]) { fs.rmSync(path.join(mediaDir, all[req.params.id].file), { force: true }); delete all[req.params.id]; db.setSetting('ritualVideos', all); }
+    res.json({ ok: true });
+  });
+
   api.use('/admin', admin);
   app.use('/api', api);
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -830,7 +1011,7 @@ function createApp(opts = {}) {
   app.use((err, req, res, next) => {
     const status = err.status || err.statusCode || 500;
     if (status >= 500 && status !== 502 && status !== 503) log.error?.(err);
-    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Photos must be 5 MB or smaller.' });
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: req.path.includes('/video') ? 'Videos must be 150 MB or smaller.' : 'Photos must be 5 MB or smaller.' });
     res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? 'Something went wrong. Try again.' : err.message });
   });
 
@@ -850,7 +1031,7 @@ function createApp(opts = {}) {
       });
     });
     for (const { userId, b } of due) {
-      await notifier.push([userId], { title: `Your ${b.service} starts at ${b.slot}`, body: `${b.studio}. Tap for the details and the fastest route.`, url: `/#booking-${b.id}` }).catch(() => {});
+      await pushLocal([userId], (lang) => ({ ...tr('reminder', lang, b), url: `/#booking-${b.id}` })).catch(() => {});
     }
     return due.length;
   }

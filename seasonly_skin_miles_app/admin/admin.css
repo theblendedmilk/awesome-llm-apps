@@ -89,3 +89,4 @@ label.f input:focus, label.f select:focus, label.f textarea:focus { outline: non
   .side .who { margin-top: 0; flex-direction: row; justify-content: space-between; align-items: center; }
   .title { font-size: 30px; }
 }
+.grid2.tight { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }

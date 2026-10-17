@@ -22,28 +22,32 @@
   ];
   const SLOTS = ['10:00', '11:30', '13:00', '14:30', '16:00', '17:30'];
 
+  // Guided rituals. Each step: [title, how-to, seconds in the video, movement shown by the animated guide].
   const RITUALS = [
     { id: 'evening-lift', eyebrow: 'Evening lift', name: 'Sculpt + nourish', mins: 6, miles: 50,
-      steps: [['Cleanse', 'Massage the Gelée Nettoyante for 60 seconds, then rinse with cool water.', 60],
-              ['Serum', 'Press 3 drops of Sérum TensioLift into face and neck.', 30],
-              ['Sculpt', 'Sweep a gua sha outwards from chin to ear, 10 strokes per side.', 180],
-              ['Nourish', 'Seal with 2 drops of Huile de Nuit, pressing gently.', 60]] },
+      steps: [['Cleanse', 'Massage the Gelée Nettoyante in small circles for 60 seconds, then rinse with cool water.', 24, 'circles'],
+              ['Serum', 'Press 3 drops of Sérum TensioLift into face and neck with flat palms.', 18, 'press'],
+              ['Sculpt', 'Sweep a gua sha outwards from chin to ear, 10 strokes per side.', 30, 'sweep'],
+              ['Nourish', 'Seal with 2 drops of Huile de Nuit, pressing gently from the centre outwards.', 18, 'press']] },
     { id: 'kobido', eyebrow: '5 min · Ritual', name: 'Kobido reveal', mins: 5, miles: 30,
-      steps: [['Warm up', 'Rub 2 drops of oil between your palms and breathe deeply 3 times.', 30],
-              ['Tap', 'Tap your fingertips across cheeks and forehead like soft rain.', 60],
-              ['Lift', 'Sweep upwards from jaw to temples, 8 times per side.', 120],
-              ['Release', 'Rest your palms on your eyes for 3 slow breaths.', 30]] },
+      steps: [['Warm up', 'Rub 2 drops of oil between your palms and breathe deeply 3 times.', 16, 'breathe'],
+              ['Tap', 'Tap your fingertips across cheeks and forehead like soft rain.', 22, 'tap'],
+              ['Lift', 'Sweep upwards from jaw to temples, 8 times per side.', 28, 'lift'],
+              ['Release', 'Rest your palms on your eyes for 3 slow breaths.', 16, 'breathe']] },
     { id: 'drainage', eyebrow: '7 min · Ritual', name: 'Glow drainage', mins: 7, miles: 30,
-      steps: [['Neck', 'Sweep down the sides of the neck 10 times.', 60],
-              ['Jaw', 'Glide your knuckles along the jaw towards the ears.', 90],
-              ['Cheeks', 'Draw the gua sha from nose to ears.', 150],
-              ['Eyes', 'Tap lightly under the eyes from inner to outer corner.', 60]] },
+      steps: [['Neck', 'Sweep down the sides of the neck 10 times to open the drainage path.', 22, 'neck'],
+              ['Jaw', 'Glide your knuckles along the jaw towards the ears.', 24, 'jaw'],
+              ['Cheeks', 'Draw the gua sha from the side of the nose to the ears.', 28, 'sweep'],
+              ['Eyes', 'Tap lightly under the eyes from the inner to the outer corner.', 18, 'eyes']] },
     { id: 'peau-neuve', eyebrow: '20 min · Ritual', name: 'Peau neuve massage', mins: 20, miles: 30,
-      steps: [['Apply', 'Spread Masque Peau Neuve on clean skin, face and neck.', 30],
-              ['Warm', 'Let the gel turn into a warming oil under your fingers.', 60],
-              ['Massage', 'Massage with the gua sha, always outwards and upwards.', 180],
-              ['Rinse', 'Leave on, then rinse with warm water after 20 minutes.', 60]] },
+      steps: [['Apply', 'Spread Masque Peau Neuve on clean skin, face and neck.', 18, 'circles'],
+              ['Warm', 'Let the gel turn into a warming oil under your fingers.', 18, 'press'],
+              ['Massage', 'Massage with the gua sha, always outwards and upwards.', 30, 'lift'],
+              ['Rinse', 'Leave on for 20 minutes, then rinse with warm water.', 16, 'rinse']] },
   ];
+  // Length of a ritual video, and how much of it must have played before the miles are credited.
+  const ritualSecs = (r) => r.steps.reduce((a, st) => a + st[2], 0);
+  const WATCH_SHARE = 0.8;
 
   const TIPS = [
     { id: 'hydration', title: 'Morning Hydration Ritual', lead: 'Start your day with this simple yet powerful hydration ritual for glowing skin.',
@@ -78,7 +82,7 @@
 
   // kind: product = usable in the bag, service = usable when booking.
   const VOUCHERS = [
-    { id: 'au-10', season: 'autumn', kind: 'product', title: '€10 off any sérum', note: 'TensioLift, Anti-âge, Regard…', cost: 800, value: 10, type: 'amount' },
+    { id: 'au-10', season: 'autumn', kind: 'product', title: '€10 off any serum', note: 'TensioLift, Anti-âge, Regard…', cost: 800, value: 10, type: 'amount' },
     { id: 'au-kit', season: 'autumn', kind: 'product', title: '−20% on your bag', note: 'Autumn nourish edit, whole bag', cost: 1200, value: 20, type: 'percent' },
     { id: 'au-glow', season: 'autumn', kind: 'service', title: '−50% Soin Signature', note: '30 min · any Face Glow Bar', cost: 1500, value: 50, type: 'percent' },
     { id: 'au-free', season: 'autumn', kind: 'service', title: 'Free 15-min Glow treatment', note: 'Soin Gym, Glow or Winter', cost: 2000, value: 25, type: 'amount' },
@@ -97,7 +101,11 @@
     { name: 'Lumière', min: 8000, mult: 1.5 },
   ];
   const MILESTONES = { 7: 100, 14: 150, 30: 300, 60: 400, 100: 600, 365: 2000 };
-  const REWARDS = { checkin: 20, tip: 10, booking: 150, welcome: 300, referral: 200 };
+  const REWARDS = { checkin: 20, tip: 10, booking: 150, guest: 50, welcome: 300, referral: 200, scan: 15 };
+  const MAX_PARTY = 5;
+  const GENDERS = ['female', 'male', 'other', 'undisclosed'];
+  // Skin scan scores, 0–100 (higher is better).
+  const SCAN_KEYS = ['hydration', 'radiance', 'evenness', 'texture', 'calm', 'firmness'];
   const DEFAULT_REFERRAL = { perFriend: 5, cap: 20, welcome: 10 };
 
   // Orders and bookings only earn miles once paid; refunds take them back.
@@ -137,10 +145,10 @@
   function newState(profile, now) {
     return {
       v: 2,
-      profile: { first: '', last: '', email: '', phone: '', ...profile },
+      profile: { first: '', last: '', email: '', phone: '', gender: 'undisclosed', ...profile },
       miles: 0, lifetime: 0, streak: 0, bestStreak: 0, checkins: [],
       ritual: {}, done: {}, vouchers: [], bookings: [], orders: [], favs: [], badges: [], claimed: [],
-      quizBest: 0, matchBest: null, wheelWin: 0, ledger: [],
+      quizBest: 0, matchBest: null, wheelWin: 0, ledger: [], scans: [],
       referral: { code: profile.referralCode || '', referredBy: profile.referredBy || null, friends: 0, discount: 0, welcome: 0 },
       createdAt: now.getTime(),
     };
@@ -151,8 +159,7 @@
   const doneOn = (s, id, now) => s.done[id] === dkey(now);
   const discount = (v, subtotal) => Math.min(subtotal, v.type === 'percent' ? Math.round(subtotal * v.value) / 100 : v.value);
   const round2 = (n) => Math.round(n * 100) / 100;
-  const ritualProgress = (s, id, now) => { const r = s.ritual[id]; return r && r.day === dkey(now) ? r.step : 0; };
-  const canCheckIn = (s, now) => !s.checkins.includes(dkey(now));
+    const canCheckIn = (s, now) => !s.checkins.includes(dkey(now));
 
   function challengeList(s, now) {
     const se = seasonOf(now), monday = mondayOf(now).getTime();
@@ -161,7 +168,7 @@
     return [
       { key: `rituals-${week}`, name: 'Complete 5 rituals this week', v: Math.min(since('ritual', monday), 5), max: 5, rew: 150 },
       { key: `tips-${week}`, name: 'Read 3 wellness tips this week', v: Math.min(since('tip', monday), 3), max: 3, rew: 60 },
-      { key: `soin-${seasonKey}`, name: `Book one soin this ${se.name.toLowerCase()}`, v: Math.min(s.bookings.filter((b) => isPaid(b) && b.t >= se.start.getTime()).length, 1), max: 1, rew: 200 },
+      { key: `soin-${seasonKey}`, name: `Book one treatment this ${se.name.toLowerCase()}`, v: Math.min(s.bookings.filter((b) => isPaid(b) && b.t >= se.start.getTime()).length, 1), max: 1, rew: 200 },
     ];
   }
 
@@ -238,20 +245,36 @@
         earn(REWARDS.tip, 'Wellness tip read', 'tip');
         break;
       }
-      case 'ritualStep': {
+      case 'ritualStart': {
+        // The video started playing: remember when, so completion can check it was really watched.
         const r = RITUALS.find((x) => x.id === p.id) || fail('Unknown ritual.');
-        const step = Math.min(ritualProgress(s, r.id, now) + 1, r.steps.length);
-        s.ritual[r.id] = { day: dkey(now), step };
-        if (step >= r.steps.length && !doneOn(s, 'ritual-' + r.id, now)) {
-          markDone('ritual-' + r.id);
-          earn(r.miles, `${r.name} ritual`, 'ritual');
-        }
-        result = { step };
+        s.ritual[r.id] = { day: dkey(now), started: now.getTime() };
         break;
       }
-      case 'ritualRestart': {
+      case 'ritualComplete': {
+        // The video reached its end. Miles once a day per ritual, only if enough of it played.
         const r = RITUALS.find((x) => x.id === p.id) || fail('Unknown ritual.');
-        s.ritual[r.id] = { day: dkey(now), step: 0 };
+        const run = s.ritual[r.id];
+        if (!run || !run.started) fail('Start the ritual video first.');
+        const share = ctx.watchShare === undefined ? WATCH_SHARE : ctx.watchShare;
+        // An uploaded video can be longer or shorter than the animated guide: ctx.videoSecs gives its length.
+        const secs = (ctx.videoSecs && ctx.videoSecs[r.id]) || ritualSecs(r);
+        if (now.getTime() - run.started < secs * 1000 * share) fail('Watch the whole video to earn your miles.');
+        s.ritual[r.id] = { day: dkey(now), done: true };
+        let earned = 0;
+        if (!doneOn(s, 'ritual-' + r.id, now)) { markDone('ritual-' + r.id); earned = earn(r.miles, `${r.name} ritual`, 'ritual'); }
+        result = { earned };
+        break;
+      }
+      case 'scan': {
+        // Skin scan result: scores are stored for the skin log; miles once a day.
+        const sc = p.scores || {};
+        const scores = {};
+        SCAN_KEYS.forEach((k) => { const v = Math.round(Number(sc[k])); if (!(v >= 0 && v <= 100)) fail('Invalid scan.'); scores[k] = v; });
+        s.scans = [{ t: now.getTime(), scores, type: String(p.skinType || '').slice(0, 20) }, ...(s.scans || [])].slice(0, 12);
+        let earned = 0;
+        if (!doneOn(s, 'scan', now)) { markDone('scan'); earned = earn(REWARDS.scan, 'Skin scan', 'scan'); }
+        result = { earned };
         break;
       }
       case 'match': {
@@ -331,10 +354,18 @@
       case 'book': {
         const st = STUDIOS.find((x) => x.id === p.studio) || fail('Choose a Face Glow Bar.');
         if (s.bookings.filter((b) => b.status === 'booked' && b.startAt > now.getTime()).length >= MAX_OPEN_BOOKINGS) fail(`You can hold up to ${MAX_OPEN_BOOKINGS} unpaid bookings. Cancel one or attend it first.`);
-        const sv = SERVICES.find((x) => x.id === p.service) || fail('Choose a treatment.');
+        // The party: you first, then up to 4 guests, each with their own treatment, all at the same time.
+        const party = Array.isArray(p.party) && p.party.length ? p.party : [{ service: p.service }];
+        if (party.length > MAX_PARTY) fail(`You can book for up to ${MAX_PARTY} people at once.`);
+        const people = party.map((x, i) => {
+          const sv = SERVICES.find((y) => y.id === (x && x.service)) || fail('Choose a treatment.');
+          return { name: i === 0 ? '' : String((x && x.name) || '').trim().slice(0, 40), service: sv.name, serviceId: sv.id, mins: sv.mins, price: sv.price };
+        });
+        const sv = SERVICES.find((x) => x.id === people[0].serviceId);
         const dayOffset = Math.floor(Number(p.day));
         if (!(dayOffset >= 1 && dayOffset <= 30) || !SLOTS.includes(p.slot)) fail('Choose a date and time.');
         const lines = [], applied = { voucher: null, welcome: 0, discount: 0 };
+        // Vouchers and referral discounts apply to your own treatment; guests pay the list price.
         let price = sv.price;
         if (p.voucher) {
           const v = s.vouchers.find((x) => x.code === p.voucher && !x.used && x.kind === 'service' && x.expires > now.getTime()) || fail('This voucher cannot be used.');
@@ -351,12 +382,14 @@
           l.amount = -round2(base * l.pct / 100); price += l.amount;
           if (l.pct) lines.push({ label: `${l.label} −${l.pct}%`, amount: l.amount });
         });
+        const guests = people.slice(1);
         const date = addDays(now, dayOffset);
         const [hh, mm] = p.slot.split(':').map(Number);
         const startAt = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm).getTime();
         const booking = { id: `BK-${now.getTime().toString(36).toUpperCase()}`, t: now.getTime(), studio: st.name, studioId: st.id, addr: st.addr, service: sv.name, serviceId: sv.id,
-          mins: sv.mins, date: dkey(date), slot: p.slot, startAt, list: sv.price, price: round2(Math.max(0, price)), lines, applied,
-          status: 'booked', miles: REWARDS.booking, credited: 0, reminded: false };
+          mins: Math.max(...people.map((x) => x.mins)), date: dkey(date), slot: p.slot, startAt, people: people.length, party: people,
+          list: round2(people.reduce((a, x) => a + x.price, 0)), price: round2(Math.max(0, price) + guests.reduce((a, x) => a + x.price, 0)), lines, applied,
+          status: 'booked', miles: REWARDS.booking + REWARDS.guest * guests.length, credited: 0, reminded: false };
         s.bookings.unshift(booking);
         result = { booking };
         break;
@@ -370,7 +403,7 @@
         const firstPaidBooking = p.kind === 'booking' && !s.bookings.some((b) => b !== item && isPaid(b) || (b !== item && b.status === 'refunded' && b.qualified));
         item.credited = p.kind === 'order'
           ? earn(item.miles, `Order ${item.id} paid`, 'order', false)
-          : earn(item.miles, `Studio visit · ${item.service}`, 'booking');
+          : earn(item.miles, `Studio visit · ${item.service}${item.people > 1 ? ` +${item.people - 1}` : ''}`, 'booking');
         if (firstPaidBooking && s.referral.referredBy) { item.qualified = true; events.push({ type: 'referralQualified', code: s.referral.referredBy }); }
         result = { item };
         break;
@@ -420,6 +453,7 @@
         if (!first) fail('Enter your first name.');
         s.profile.first = first;
         if (p.last !== undefined) s.profile.last = String(p.last).trim().slice(0, 40);
+        if (p.gender !== undefined) s.profile.gender = GENDERS.includes(p.gender) ? p.gender : fail('Choose an option.');
         break;
       }
       case 'fav': {
@@ -441,8 +475,8 @@
   }
 
   return {
-    SERVICES, STUDIOS, SLOTS, RITUALS, TIPS, QUIZ, WHEEL, SEASONS, VOUCHERS, TIERS, MILESTONES, REWARDS, BADGES, DEFAULT_REFERRAL,
-    dkey, addDays, isoWeek, seasonOf, mondayOf, tierOf, nextTier, discount, ritualProgress, canCheckIn, challengeList, doneOn, isPaid, MAX_OPEN_BOOKINGS,
+    SERVICES, STUDIOS, SLOTS, RITUALS, TIPS, QUIZ, WHEEL, SEASONS, VOUCHERS, TIERS, MILESTONES, REWARDS, BADGES, DEFAULT_REFERRAL, MAX_PARTY, GENDERS, SCAN_KEYS, WATCH_SHARE,
+    dkey, addDays, isoWeek, seasonOf, mondayOf, tierOf, nextTier, discount, ritualSecs, canCheckIn, challengeList, doneOn, isPaid, MAX_OPEN_BOOKINGS,
     newState, apply, RuleError,
   };
 });

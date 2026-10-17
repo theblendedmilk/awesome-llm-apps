@@ -9,23 +9,29 @@ const { createApp } = require('../server/app');
 const images = require('../server/images');
 
 let server, base, ctx;
+// Moves the server clock forward, for rules that need time to pass (ritual videos).
+let skew = 0;
+// Stand-in for the skin analyser, so tests never call the real model.
+const fakeScan = async (jpeg, { lang }) => ({ face: true, skinType: 'combination', scores: { hydration: 70, radiance: 80, evenness: 75, texture: 66, calm: 90, firmness: 72 },
+  headline: lang === 'en' ? 'Glowing' : 'Lumineuse', summary: 'ok', tips: ['a', 'b', 'c'], ritual: 'kobido', products: ['serum-tensiolift', 'nope'] });
 const quiet = { info() {}, warn() {}, error() {} };
 
 before(async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seasonly-test-'));
-  ctx = createApp({ dbFile: ':memory:', dataDir, env: { DEV_SHOW_CODES: '1', OTP_SEND_PER_IP: '1000', OTP_VERIFY_PER_IP: '1000', ADMIN_EMAIL: 'admin@seasonly.fr', ADMIN_PASSWORD: 'test-password-123' }, log: quiet });
+  ctx = createApp({ dbFile: ':memory:', dataDir, env: { DEV_SHOW_CODES: '1', OTP_SEND_PER_IP: '1000', OTP_VERIFY_PER_IP: '1000', ADMIN_EMAIL: 'admin@seasonly.fr', ADMIN_PASSWORD: 'test-password-123', ADMIN_LOGIN_PER_IP: '1000' }, log: quiet,
+    clock: () => new Date(Date.now() + skew), skinAnalyzer: fakeScan });
   await new Promise((ok) => { server = ctx.app.listen(0, '127.0.0.1', ok); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
 after(() => new Promise((ok) => server.close(ok)));
 
 /* A tiny client that keeps its own cookie, like one phone. */
-function client() {
+function client(lang = 'en') {
   let cookie = '';
   async function call(method, url, body, { raw, headers = {}, csrf = true } = {}) {
     const res = await fetch(base + url, {
       method,
-      headers: { ...(csrf ? { 'X-Seasonly': '1' } : {}), ...(cookie ? { cookie } : {}), ...(raw ? { 'Content-Type': raw.type || 'image/jpeg' } : body ? { 'Content-Type': 'application/json' } : {}), ...headers },
+      headers: { ...(csrf ? { 'X-Seasonly': '1' } : {}), ...(lang ? { 'X-Lang': lang } : {}), ...(cookie ? { cookie } : {}), ...(raw ? { 'Content-Type': raw.type || 'image/jpeg' } : body ? { 'Content-Type': 'application/json' } : {}), ...headers },
       body: raw ? raw.data : body ? JSON.stringify(body) : undefined,
     });
     const set = res.headers.get('set-cookie');
@@ -40,7 +46,7 @@ const ADDR = { line1: '12 rue de Turenne', postcode: '75004', city: 'Paris', cou
 let phoneN = 10;
 async function signup(c, extra = {}) {
   phoneN += 1;
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Marie', last: 'Dupont', email: `user${phoneN}@example.fr`, phone: `06 12 34 56 ${phoneN}`, consent: true, address: ADDR, channel: 'both', ...extra });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Marie', last: 'Dupont', email: `user${phoneN}@example.fr`, phone: `06 12 34 56 ${phoneN}`, consent: true, address: ADDR, gender: 'female', channel: 'both', ...extra });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   const v = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
   assert.equal(v.status, 200, JSON.stringify(v.data));
@@ -92,11 +98,13 @@ test('security headers and CSRF guard', async () => {
 
 test('sign-up validation', async () => {
   const c = client();
-  const bad = async (body, re) => { const r = await c.call('POST', '/api/auth/signup', { first: 'A', email: 'a@b.fr', phone: '0612345678', consent: true, address: ADDR, ...body }); assert.equal(r.status, 400); assert.match(r.data.error, re); };
+  const bad = async (body, re) => { const r = await c.call('POST', '/api/auth/signup', { first: 'A', email: 'a@b.fr', phone: '0612345678', consent: true, address: ADDR, gender: 'female', ...body }); assert.equal(r.status, 400); assert.match(r.data.error, re); };
   await bad({ first: '' }, /first name/);
   await bad({ email: 'nope' }, /email/);
   await bad({ phone: '123' }, /mobile/);
   await bad({ consent: false }, /accept/);
+  await bad({ gender: undefined }, /identify/);
+  await bad({ gender: 'robot' }, /identify/);
   await bad({ referral: 'NOPE1234' }, /referral code/);
   await bad({ address: { line1: '', postcode: '75004', city: 'Paris' } }, /street address/);
   await bad({ address: { ...ADDR, postcode: '!' } }, /postcode/);
@@ -105,7 +113,7 @@ test('sign-up validation', async () => {
 
 test('sign-up, wrong codes, confirmation and welcome gift', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Camille', email: 'camille@example.fr', phone: '+33 6 99 88 77 66', consent: true, address: ADDR, channel: 'sms' });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Camille', email: 'camille@example.fr', phone: '+33 6 99 88 77 66', consent: true, address: ADDR, gender: 'female', channel: 'sms' });
   assert.equal(r.status, 200);
   assert.match(r.data.devCode, /^\d{6}$/);
   assert.equal(r.data.sentTo.sms, '+33 •• •• •• 66');
@@ -124,7 +132,7 @@ test('sign-up, wrong codes, confirmation and welcome gift', async () => {
   // The code can't be reused.
   assert.equal((await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode })).status, 410);
   // Same confirmed phone again: refused.
-  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'other@example.fr', phone: '06 99 88 77 66', consent: true, address: ADDR });
+  const dup = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'other@example.fr', phone: '06 99 88 77 66', consent: true, address: ADDR, gender: 'female' });
   assert.equal(dup.status, 409);
   // The code was "sent" by SMS and logged in the outbox (no provider configured).
   const sms = ctx.db.prepare("SELECT * FROM outbox WHERE channel = 'sms' AND to_addr = '+33699887766'").get();
@@ -135,7 +143,7 @@ test('sign-up, wrong codes, confirmation and welcome gift', async () => {
 test('an unconfirmed email or phone cannot be used to take over an account', async () => {
   // Attacker signs up with the victim's email but their own phone, and confirms only the SMS code.
   const attacker = client();
-  const r = await attacker.call('POST', '/api/auth/signup', { first: 'Mallory', email: 'victim@example.fr', phone: '0655555501', consent: true, address: ADDR, channel: 'sms' });
+  const r = await attacker.call('POST', '/api/auth/signup', { first: 'Mallory', email: 'victim@example.fr', phone: '0655555501', consent: true, address: ADDR, gender: 'female', channel: 'sms' });
   const v = await attacker.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
   assert.equal(v.status, 200);
   assert.equal(v.data.user.emailVerified, false);
@@ -146,7 +154,7 @@ test('an unconfirmed email or phone cannot be used to take over an account', asy
   assert.equal(probe.data.devCode, undefined);
   // The real owner can still sign up with their email and takes it over by proving it.
   const victim = client();
-  const s = await victim.call('POST', '/api/auth/signup', { first: 'Vic', email: 'victim@example.fr', phone: '0655555502', consent: true, address: ADDR, channel: 'email' });
+  const s = await victim.call('POST', '/api/auth/signup', { first: 'Vic', email: 'victim@example.fr', phone: '0655555502', consent: true, address: ADDR, gender: 'female', channel: 'email' });
   assert.equal(s.status, 200, 'not blocked by the attacker account');
   const sv = await victim.call('POST', '/api/auth/verify', { pending: s.data.pending, code: s.data.devCode });
   assert.equal(sv.status, 200);
@@ -157,13 +165,13 @@ test('an unconfirmed email or phone cannot be used to take over an account', asy
   assert.equal(me.email, null);
   assert.notEqual(me.id, sv.data.user.id);
   // Once confirmed, the email is protected: nobody else can claim it.
-  const again = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'victim@example.fr', phone: '0655555503', consent: true, address: ADDR });
+  const again = await client().call('POST', '/api/auth/signup', { first: 'X', email: 'victim@example.fr', phone: '0655555503', consent: true, address: ADDR, gender: 'female' });
   assert.equal(again.status, 409);
 });
 
 test('choosing both sends two different codes; each confirms its own channel', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Both', email: 'both@example.fr', phone: '0655555510', consent: true, address: ADDR, channel: 'both' });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Both', email: 'both@example.fr', phone: '0655555510', consent: true, address: ADDR, gender: 'female', channel: 'both' });
   assert.match(r.data.devEmailCode, /^\d{6}$/);
   assert.notEqual(r.data.devCode, r.data.devEmailCode);
   const v = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devEmailCode });
@@ -177,7 +185,7 @@ test('choosing both sends two different codes; each confirms its own channel', a
 
 test('five wrong codes lock the request', async () => {
   const c = client();
-  const r = await c.call('POST', '/api/auth/signup', { first: 'Lock', email: 'lock@example.fr', phone: '0677777777', consent: true, address: ADDR });
+  const r = await c.call('POST', '/api/auth/signup', { first: 'Lock', email: 'lock@example.fr', phone: '0677777777', consent: true, address: ADDR, gender: 'female' });
   const wrong = String((Number(r.data.devCode) + 7) % 1e6).padStart(6, '0');
   for (let i = 0; i < 5; i++) await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: wrong });
   const after = await c.call('POST', '/api/auth/verify', { pending: r.data.pending, code: r.data.devCode });
@@ -225,8 +233,19 @@ test('rewards run on the server', async () => {
   r = await act(c, 'wheel');
   assert.ok([10, 25, 5, 50, 15, 100, 20, 30].includes(r.data.result.earned));
   assert.equal((await act(c, 'wheel')).status, 422);
-  for (let i = 0; i < 4; i++) r = await act(c, 'ritualStep', { id: 'evening-lift' });
+  // Ritual videos: miles only at the end of a video that really played.
+  assert.equal((await act(c, 'ritualStep', { id: 'evening-lift' })).status, 400, 'old step-by-step action is gone');
+  assert.equal((await act(c, 'ritualComplete', { id: 'evening-lift' })).status, 422, 'not started');
+  assert.equal((await act(c, 'ritualStart', { id: 'evening-lift' })).status, 200);
+  r = await act(c, 'ritualComplete', { id: 'evening-lift' });
+  assert.equal(r.status, 422, 'finished too fast');
+  assert.match(r.data.error, /whole video/);
+  skew = 200 * 1000;
+  r = await act(c, 'ritualComplete', { id: 'evening-lift' });
+  skew = 0;
+  assert.equal(r.status, 200);
   assert.ok(r.data.events.some((e) => e.type === 'miles' && e.amt === 50));
+  assert.equal(r.data.result.earned, 50);
   // Server-only actions are refused.
   for (const type of ['welcome', 'referralCredit', 'referralRevoke', 'avatar', 'adjust', 'pay', 'refund']) assert.equal((await act(c, type, { name: 'x' })).status, 400, type);
 });
@@ -365,7 +384,7 @@ test('admin panel is closed without a password; codes only go to served countrie
   const res = await fetch(`http://127.0.0.1:${s2.address().port}/api/admin/login`, { method: 'POST', headers: { 'X-Seasonly': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@seasonly.fr', password: 'seasonly-admin' }) });
   assert.equal(res.status, 503);
   s2.close();
-  const uk = await client().call('POST', '/api/auth/signup', { first: 'Al', email: 'al@example.co.uk', phone: '+447700900123', consent: true, address: ADDR });
+  const uk = await client().call('POST', '/api/auth/signup', { first: 'Al', email: 'al@example.co.uk', phone: '+447700900123', consent: true, address: ADDR, gender: 'female' });
   assert.equal(uk.status, 400);
   assert.match(uk.data.error, /France/);
 });
@@ -398,7 +417,7 @@ test('referral: friend gets 10%, referrer earns 5% per friend up to 20%', async 
   me = (await ref.call('GET', '/api/me')).data.user.state;
   assert.equal(me.referral.discount, 0, 'reward used');
   // Own code is refused.
-  const self = await client().call('POST', '/api/auth/signup', { first: 'Me', email: referrer.email, phone: '0600000099', consent: true, address: ADDR, referral: referrer.referralCode });
+  const self = await client().call('POST', '/api/auth/signup', { first: 'Me', email: referrer.email, phone: '0600000099', consent: true, address: ADDR, gender: 'female', referral: referrer.referralCode });
   assert.equal(self.status, 400);
   // Referrer was notified by email.
   assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE ?').get(referrer.email, '%reward is ready%'));
@@ -542,7 +561,8 @@ test('contests: enter, draw a random winner, prize appears in the winner profile
   let r = await a.call('POST', '/api/admin/contests', { period: 'week', prizeKind: 'soin', prizeRef: 'signature', winners: 1, announce: true });
   assert.equal(r.status, 201);
   const contest = r.data.contest;
-  assert.equal(contest.title, 'Win a Soin Signature');
+  assert.equal(contest.title, 'Gagnez un Soin Signature');
+  assert.equal(contest.titleEn, 'Win a Soin Signature');
   assert.ok(contest.endsAt > Date.now());
   assert.equal((await a.call('POST', `/api/admin/contests/${contest.id}/draw`)).status, 400, 'nobody entered yet');
   const players = [];
@@ -604,4 +624,176 @@ test('product giveaway ships to the saved address', async () => {
   assert.equal((await c.call('GET', '/api/me/gifts')).data.gifts[0].status, 'shipped');
   assert.equal((await a.call('POST', `/api/admin/gifts/${g.id}/shipped`)).status, 400, 'only once');
   assert.ok(ctx.db.prepare('SELECT 1 FROM outbox WHERE to_addr = ? AND subject = ?').get(u.email, 'Your gift is on its way'));
+});
+
+test('gender is chosen at sign-up and can be changed', async () => {
+  const c = client();
+  const u = await signup(c, { gender: 'male' });
+  assert.equal(u.gender, 'male');
+  assert.equal(u.state.profile.gender, 'male');
+  let r = await act(c, 'profile', { first: 'Marc', gender: 'other' });
+  assert.equal(r.data.state.profile.gender, 'other');
+  assert.equal((await act(c, 'profile', { first: 'Marc', gender: 'robot' })).status, 422);
+  const a = await adminClient();
+  const row = (await a.call('GET', `/api/admin/users?q=${encodeURIComponent(u.email)}`)).data.users[0];
+  assert.equal(row.gender, 'male', 'admin sees the gender given at sign-up');
+});
+
+test('emails and notifications follow the language of the app', async () => {
+  const fr = client('fr');
+  const uf = await signup(fr, { channel: 'email' });
+  assert.equal(uf.lang, 'fr');
+  const code = ctx.db.prepare("SELECT * FROM outbox WHERE to_addr = ? AND subject LIKE '%code%' ORDER BY id DESC").get(uf.email);
+  assert.match(code.subject, /est votre code Seasonly/);
+  assert.match(code.body, /^Bonjour Marie/);
+  await act(fr, 'book', { studio: 'canopee', service: 'glow', day: 3, slot: '11:30' });
+  const booked = ctx.db.prepare('SELECT * FROM outbox WHERE to_addr = ? ORDER BY id DESC').get(uf.email);
+  assert.match(booked.subject, /^Votre Soin Glow est réservé/);
+  assert.match(booked.body, /Itinéraire/);
+  assert.doesNotMatch(booked.body, /Directions|Price:/, 'no English in a French email');
+  const en = client('en');
+  const ue = await signup(en, { channel: 'email' });
+  assert.equal(ue.lang, 'en');
+  await act(en, 'book', { studio: 'canopee', service: 'glow', day: 3, slot: '11:30' });
+  const bookedEn = ctx.db.prepare('SELECT * FROM outbox WHERE to_addr = ? ORDER BY id DESC').get(ue.email);
+  assert.match(bookedEn.subject, /^Your Soin Glow is booked/);
+  assert.doesNotMatch(bookedEn.body, /Bonjour|Itinéraire/, 'no French in an English email');
+  // Switching the app language switches the emails too.
+  const sw = client('en'); sw.call; // same cookie jar, new language header below
+  const me = await fr.call('GET', '/api/me', null, { headers: { 'X-Lang': 'en' } });
+  assert.equal(me.data.user.lang, 'en');
+  // Admin email with an English version: each customer gets their own language.
+  const a = await adminClient();
+  await fr.call('GET', '/api/me', null, { headers: { 'X-Lang': 'fr' } });
+  const r = await a.call('POST', '/api/admin/email', { audience: 'all', subject: 'Nouveautés', body: 'Bonjour {first}', subjectEn: 'News', bodyEn: 'Hello {first}' });
+  assert.equal(r.status, 200);
+  assert.ok(ctx.db.prepare("SELECT 1 FROM outbox WHERE to_addr = ? AND subject = 'Nouveautés'").get(uf.email));
+  assert.ok(ctx.db.prepare("SELECT 1 FROM outbox WHERE to_addr = ? AND subject = 'News' AND body = 'Hello Marie'").get(ue.email));
+  assert.ok(!ctx.db.prepare("SELECT 1 FROM outbox WHERE to_addr = ? AND subject = 'Nouveautés'").get(ue.email));
+});
+
+test('group booking for up to 5 people', async () => {
+  const c = client();
+  const u = await signup(c, { channel: 'email' });
+  const party = [{ service: 'glow' }, { service: 'signature', name: 'Zoé' }, { service: 'gym', name: '' }];
+  let r = await act(c, 'book', { studio: 'saint-lazare', party, day: 4, slot: '14:30' });
+  assert.equal(r.status, 200);
+  const b = r.data.result.booking;
+  assert.equal(b.people, 3);
+  assert.equal(b.list, 100);
+  assert.equal(b.price, 100);
+  assert.equal(b.miles, 150 + 2 * 50, 'you earn 150 plus 50 per guest');
+  assert.equal(b.mins, 30, 'the longest treatment sets the duration');
+  assert.deepEqual(b.party.map((p) => p.serviceId), ['glow', 'signature', 'gym']);
+  assert.equal(b.party[1].name, 'Zoé');
+  const mail = ctx.db.prepare('SELECT * FROM outbox WHERE to_addr = ? ORDER BY id DESC').get(u.email);
+  assert.match(mail.body, /3 people/);
+  assert.match(mail.body, /Zoé: Soin Signature/);
+  // Prices come from the server; a 6th person or an unknown treatment is refused.
+  assert.equal((await act(c, 'book', { studio: 'saint-lazare', party: [...party, ...party], day: 4, slot: '14:30' })).status, 422);
+  assert.equal((await act(c, 'book', { studio: 'saint-lazare', party: [{ service: 'glow' }, { service: 'free' }], day: 4, slot: '14:30' })).status, 422);
+  // Paid: the miles of the whole group are credited, and a refund takes them back.
+  const a = await adminClient();
+  const before = await miles(c);
+  assert.equal((await adminOp(a, 'bookings', u.id, b.id, 'pay')).status, 200);
+  assert.equal(await miles(c), before + 250);
+  // The admin sees the group.
+  const row = (await a.call('GET', '/api/admin/bookings')).data.bookings.find((x) => x.id === b.id);
+  assert.equal(row.people, 3);
+});
+
+test('skin scan: analysed on the server, never stored, miles once a day', async () => {
+  assert.equal((await client().call('GET', '/api/config')).data.scan, 'server');
+  const c = client('fr');
+  await signup(c);
+  const imagesBefore = ctx.db.prepare('SELECT COUNT(*) AS n FROM images').get().n;
+  assert.equal((await c.call('POST', '/api/skin-scan', null, { raw: { data: Buffer.from('not an image'), type: 'image/jpeg' } })).status, 415);
+  let r = await c.call('POST', '/api/skin-scan', null, { raw: { data: jpegWithExif(), type: 'image/jpeg' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.scan.headline, 'Lumineuse', 'written in the language of the app');
+  assert.deepEqual(r.data.scan.products, ['serum-tensiolift'], 'unknown products are dropped');
+  assert.equal(r.data.result.earned, 15);
+  assert.equal(r.data.state.scans[0].scores.calm, 90);
+  assert.equal(ctx.db.prepare('SELECT COUNT(*) AS n FROM images').get().n, imagesBefore, 'the photo is not kept');
+  r = await c.call('POST', '/api/skin-scan', null, { raw: { data: jpegWithExif(), type: 'image/jpeg' } });
+  assert.equal(r.data.result.earned, 0, 'miles once a day');
+  assert.equal(r.data.state.scans.length, 2);
+  assert.equal((await client().call('POST', '/api/skin-scan', null, { raw: { data: jpegWithExif(), type: 'image/jpeg' } })).status, 401);
+  // Scores sent by the phone (on-device scan) are checked.
+  assert.equal((await act(c, 'scan', { scores: { hydration: 900 } })).status, 422);
+});
+
+test('collabs: seeded Seasonly x Blissim, event registration, admin management', async () => {
+  const c = client();
+  const u = await signup(c, { channel: 'email' });
+  let list = (await c.call('GET', '/api/collabs')).data.collabs;
+  const blissim = list.find((x) => x.partner === 'Blissim');
+  assert.ok(blissim, 'Seasonly x Blissim is there from the start');
+  assert.equal(blissim.fr.title, 'Seasonly x Blissim');
+  assert.ok(blissim.en.subtitle && blissim.fr.subtitle && blissim.en.subtitle !== blissim.fr.subtitle, 'French and English copy');
+  const ev = list.find((x) => x.kind === 'event');
+  assert.equal((await c.call('POST', `/api/collabs/${blissim.id}/join`)).status, 400, 'no registration for a brand collab');
+  let r = await c.call('POST', `/api/collabs/${ev.id}/join`);
+  assert.equal(r.status, 200);
+  assert.equal(r.data.collab.registered, true);
+  assert.equal(r.data.collab.registrations, ev.registrations + 1);
+  assert.ok(ctx.db.prepare("SELECT 1 FROM outbox WHERE to_addr = ? AND subject LIKE 'You''re registered%'").get(u.email));
+  assert.equal((await client().call('POST', `/api/collabs/${ev.id}/join`)).status, 401);
+  const a = await adminClient();
+  const adm = (await a.call('GET', '/api/admin/collabs')).data.collabs.find((x) => x.id === ev.id);
+  assert.equal(adm.attendees[0].email, u.email);
+  // Admin creates a full event: nobody else can register.
+  r = await a.call('POST', '/api/admin/collabs', { partner: 'Le Bon Marché', kind: 'event', rsvp: true, capacity: 1, fr: { title: 'Atelier gua sha' }, en: { title: 'Gua sha workshop' }, link: 'javascript:alert(1)' });
+  assert.equal(r.status, 400, 'only https links');
+  r = await a.call('POST', '/api/admin/collabs', { partner: 'Le Bon Marché', kind: 'event', rsvp: true, capacity: 1, fr: { title: 'Atelier gua sha' }, en: { title: 'Gua sha workshop' }, link: 'https://www.lebonmarche.com' });
+  assert.equal(r.status, 201);
+  const id = r.data.collab.id;
+  assert.equal((await c.call('POST', `/api/collabs/${id}/join`)).status, 200);
+  const other = client(); await signup(other);
+  assert.equal((await other.call('POST', `/api/collabs/${id}/join`)).status, 422, 'full');
+  assert.equal((await c.call('DELETE', `/api/collabs/${id}/join`)).data.collab.registered, false);
+  assert.equal((await other.call('POST', `/api/collabs/${id}/join`)).status, 200, 'a place opened up');
+  assert.equal((await a.call('PUT', `/api/admin/collabs/${id}`, { partner: 'Le Bon Marché', kind: 'event', active: false, fr: { title: 'Atelier' } })).status, 200);
+  list = (await c.call('GET', '/api/collabs')).data.collabs;
+  assert.ok(!list.some((x) => x.id === id), 'hidden collabs are not listed');
+  assert.equal((await a.call('DELETE', `/api/admin/collabs/${id}`)).status, 200);
+});
+
+test('ritual videos uploaded in the admin panel', async () => {
+  const a = await adminClient();
+  const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypmp42'), Buffer.alloc(4000, 1)]);
+  assert.equal((await a.call('POST', '/api/admin/rituals/kobido/video', null, { raw: { data: Buffer.alloc(4000, 1), type: 'video/mp4' } })).status, 400, 'bytes are checked');
+  let r = await a.call('POST', '/api/admin/rituals/kobido/video', null, { raw: { data: mp4, type: 'video/mp4' }, headers: { 'X-Duration': '42' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const url = (await client().call('GET', '/api/config')).data.ritualVideos.kobido;
+  assert.equal(url, r.data.video);
+  const res = await fetch(base + url, { headers: { Range: 'bytes=0-99' } });
+  assert.equal(res.status, 206, 'iPhones need range requests');
+  assert.equal((await res.arrayBuffer()).byteLength, 100);
+  assert.equal((await fetch(base + '/api/media/..%2Fseasonly.db')).status, 404);
+  // Completion checks the uploaded video's own length (42 s).
+  const c = client(); await signup(c);
+  await act(c, 'ritualStart', { id: 'kobido' });
+  skew = 40 * 1000;
+  r = await act(c, 'ritualComplete', { id: 'kobido' });
+  skew = 0;
+  assert.equal(r.status, 200, '40 s of a 42 s video is enough');
+  assert.equal((await a.call('DELETE', '/api/admin/rituals/kobido/video')).status, 200);
+  assert.equal((await client().call('GET', '/api/config')).data.ritualVideos.kobido, undefined);
+});
+
+test('security headers allow the camera for this site only', async () => {
+  const r = await client().call('GET', '/api/health');
+  assert.match(r.headers.get('permissions-policy'), /camera=\(self\)/);
+  assert.match(r.headers.get('permissions-policy'), /microphone=\(\)/);
+});
+
+test('a contest with as many winners as entrants gives everyone the prize', async () => {
+  const a = await adminClient();
+  const id = (await a.call('POST', '/api/admin/contests', { period: 'month', prizeKind: 'soin', prizeRef: 'gym', winners: 3 })).data.contest.id;
+  const users = [];
+  for (let i = 0; i < 3; i++) { const c = client(); users.push(await signup(c)); assert.equal((await c.call('POST', `/api/contests/${id}/enter`)).status, 200); }
+  const r = await a.call('POST', `/api/admin/contests/${id}/draw`);
+  assert.equal(r.data.winners.length, 3);
+  assert.deepEqual(r.data.winners.map((w) => w.id).sort(), users.map((u) => u.id).sort());
 });

@@ -4,7 +4,9 @@
   "private": true,
   "description": "Seasonly Paris app with the Skin Miles rewards game, plus its backend and admin panel.",
   "main": "server/index.js",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "NODE_ENV=development DEV_SHOW_CODES=1 node server/index.js",
@@ -13,6 +15,7 @@
     "test:all": "node --test test/api.test.js && node test/e2e.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.135.0",
     "express": "4.21.2",
     "nodemailer": "6.9.16",
     "web-push": "3.6.7"

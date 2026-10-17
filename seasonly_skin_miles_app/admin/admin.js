@@ -1,4 +1,4 @@
-/* Seasonly admin panel: products, customers, bookings, orders, referrals, email, push and settings. */
+/* Seasonly admin panel: products, customers, bookings, orders, contests, collabs, ritual videos, referrals, email, push and settings. */
 (() => {
   'use strict';
   const root = document.getElementById('root');
@@ -7,6 +7,9 @@
   const eur = (n) => `€${Number(n || 0).toFixed(2).replace('.', ',').replace(',00', '')}`;
   const nf = (n) => Math.round(n || 0).toLocaleString('en-US');
   const when = (t) => (t ? new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+  const GENDER = { female: 'Woman', male: 'Man', other: 'Other', undisclosed: 'Not said' };
+  const LANG = { fr: 'French', en: 'English' };
+  const localInput = (t) => (t ? new Date(t - new Date(t).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 
   async function api(method, url, body, raw) {
     const res = await fetch('/api/admin' + url, {
@@ -32,7 +35,7 @@
   };
   const milesCell = (x) => (x.credited ? `${x.status === 'refunded' ? '−' : '+'}${nf(x.credited)}` : `<span class="muted">${nf(x.miles || 0)} on payment</span>`);
   const state = { me: null, view: 'dashboard', data: {}, q: '', modal: null, error: '' };
-  const VIEWS = [['dashboard', 'Dashboard'], ['inbox', 'Inbox'], ['contests', 'Contests'], ['gifts', 'Gifts'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
+  const VIEWS = [['dashboard', 'Dashboard'], ['inbox', 'Inbox'], ['contests', 'Contests'], ['gifts', 'Gifts'], ['collabs', 'Collabs'], ['rituals', 'Ritual videos'], ['products', 'Products'], ['customers', 'Customers'], ['bookings', 'Bookings'], ['orders', 'Orders'],
     ['referrals', 'Referrals'], ['email', 'Email'], ['push', 'Push notifications'], ['outbox', 'Sent messages'], ['settings', 'Settings']];
 
   /* ---------- Views ---------- */
@@ -70,9 +73,10 @@
       const list = state.data.users;
       return `<p class="eyebrow">Skin Miles</p><h1 class="title">Customers</h1>
         <form class="row" data-form="search" style="margin-bottom:14px"><label class="f" style="flex:1"><input name="q" id="q" placeholder="Search by name, email, phone or referral code" value="${esc(state.q)}"></label><button class="btn ghost">Search</button></form>
-        ${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No customers yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Status</th><th class="num">Miles</th><th>Tier</th><th class="num">Streak</th><th class="num">Bookings</th><th class="num">Referred friends</th><th>Last sign-in</th><th></th></tr></thead><tbody>
+        ${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No customers yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Gender · language</th><th>Status</th><th class="num">Miles</th><th>Tier</th><th class="num">Streak</th><th class="num">Bookings</th><th class="num">Referred friends</th><th>Last sign-in</th><th></th></tr></thead><tbody>
         ${list.map((u) => `<tr><td><b>${esc(u.first)} ${esc(u.last)}</b><div class="muted">${esc(u.referralCode || '')}${u.referredBy ? ` · via ${esc(u.referredBy)}` : ''}</div></td>
           <td>${esc(u.email)}<div class="muted">${esc(u.phone)}</div></td>
+          <td>${esc(GENDER[u.gender] || '—')}<div class="muted">${esc(LANG[u.lang] || '')}</div></td>
           <td>${u.verified ? '<span class="pill ok">Confirmed</span>' : '<span class="pill grey">Pending code</span>'}${u.push ? ' <span class="pill soft">Push</span>' : ''}</td>
           <td class="num">${nf(u.miles)}</td><td>${esc(u.tier)}</td><td class="num">${u.streak}</td><td class="num">${u.bookings}</td><td class="num">${u.friends}</td><td>${when(u.lastLogin)}</td>
           <td class="num">${u.verified ? `<button class="btn ghost sm" data-a="miles" data-id="${u.id}" data-name="${esc(u.first)}">Adjust miles</button>` : ''}</td></tr>`).join('')}
@@ -80,8 +84,8 @@
     },
     bookings() {
       const list = state.data.bookings;
-      return `<p class="eyebrow">Face Glow Bar</p><h1 class="title">Bookings</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No bookings yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Reference</th><th>Customer</th><th>Treatment</th><th>Face Glow Bar</th><th>Date</th><th class="num">Price</th><th>Discounts</th><th>Status</th><th class="num">Miles</th><th></th></tr></thead><tbody>
-        ${list.map((b) => `<tr><td>${esc(b.id)}</td><td>${esc(b.customer)}<div class="muted">${esc(b.email)}</div></td><td>${esc(b.service)}</td><td>${esc(b.studio)}</td>
+      return `<p class="eyebrow">Face Glow Bar</p><h1 class="title">Bookings</h1>${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No bookings yet.</p>' : `<div class="table-wrap"><table><thead><tr><th>Reference</th><th>Customer</th><th>Treatment</th><th class="num">People</th><th>Face Glow Bar</th><th>Date</th><th class="num">Price</th><th>Discounts</th><th>Status</th><th class="num">Miles</th><th></th></tr></thead><tbody>
+        ${list.map((b) => `<tr><td>${esc(b.id)}</td><td>${esc(b.customer)}<div class="muted">${esc(b.email)}</div></td><td>${b.party && b.party.length > 1 ? b.party.map((p, i) => `${i ? esc(p.name || `Guest ${i}`) : 'Customer'}: ${esc(p.service)}`).join('<br>') : esc(b.service)}</td><td class="num">${b.people || 1}</td><td>${esc(b.studio)}</td>
           <td>${esc(new Date(b.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }))} · ${esc(b.slot)}</td>
           <td class="num">${eur(b.price)}${b.price < b.list ? `<div class="muted"><s>${eur(b.list)}</s></div>` : ''}</td>
           <td>${(b.lines || []).map((l) => `<div class="muted">${esc(l.label)}</div>`).join('') || '—'}</td><td>${statusPill(b)}<div class="muted">booked ${when(b.t)}</div></td>
@@ -109,8 +113,11 @@
             <label class="f">Prize<select name="prizeKind" id="ct-kind">${[['soin', 'A treatment (soin)'], ['product', 'A product']].map(([k, l]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
             <label class="f">Winners<input type="number" name="winners" id="ct-winners" min="1" max="20" value="1"></label></div>
           <label class="f">Which one<select name="prizeRef" id="ct-ref">${prizeOptions(kind)}</select></label>
-          <label class="f">Title (optional)<input name="title" id="ct-title" maxlength="80" placeholder="Contest of the week: win a Soin Signature"></label>
-          <label class="f">Description (optional)<textarea name="description" id="ct-desc" maxlength="600" style="min-height:80px" placeholder="How to enter, what you win…"></textarea></label>
+          <div class="grid2 tight"><label class="f">Title in French (optional)<input name="title" id="ct-title" maxlength="80" placeholder="Gagnez un Soin Signature"></label>
+            <label class="f">Title in English (optional)<input name="titleEn" id="ct-title-en" maxlength="80" placeholder="Win a Soin Signature"></label></div>
+          <div class="grid2 tight"><label class="f">Description in French (optional)<textarea name="description" id="ct-desc" maxlength="600" style="min-height:80px" placeholder="Comment participer, ce que vous gagnez…"></textarea></label>
+            <label class="f">Description in English (optional)<textarea name="descriptionEn" id="ct-desc-en" maxlength="600" style="min-height:80px" placeholder="How to enter, what you win…"></textarea></label></div>
+          <span class="hint">The app shows each customer the language they chose. Leave both titles empty for “Gagnez un… / Win a…”.</span>
           <label class="f">Ends on (optional)<input type="date" name="endsAt" id="ct-ends"><span class="hint">Leave empty to end with the week, month or year.</span></label>
           <label class="check"><input type="checkbox" name="announce" id="ct-announce" checked> Announce it with a push notification</label>
           ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
@@ -118,7 +125,7 @@
         </form>
         <div class="card"><h3>How it works</h3><p class="muted" style="margin-top:8px">Customers enter from the Rewards tab (a postal address is required). When the contest ends, press <b>Draw winner</b>: winners are picked at random among the entrants and the prize appears in their profile under My gifts, with a push notification and an email. A treatment becomes a free-treatment voucher; a product appears in Gifts, ready to ship.</p></div></div>
         <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Contest</th><th>Prize</th><th>Ends</th><th class="num">Entries</th><th>Status</th><th></th></tr></thead><tbody>
-        ${d.contests.map((c) => `<tr><td><b>${esc(c.title)}</b><div class="muted">${esc(d.periods[c.period])}</div></td><td>${esc(c.prizeLabel)}${c.winners > 1 ? ` × ${c.winners}` : ''}</td>
+        ${d.contests.map((c) => `<tr><td><b>${esc(c.title)}</b>${c.titleEn ? `<div class="muted">EN: ${esc(c.titleEn)}</div>` : ''}<div class="muted">${esc(d.periods[c.period])}</div></td><td>${esc(c.prizeLabel)}${c.winners > 1 ? ` × ${c.winners}` : ''}</td>
           <td>${when(c.endsAt)}</td><td class="num">${nf(c.entries)}</td>
           <td>${c.status === 'open' ? `<span class="pill ok">Open</span>` : c.status === 'drawn' ? `<span class="pill soft">Won by ${esc(c.winnerNames.join(', '))}</span>` : '<span class="pill grey">Closed</span>'}</td>
           <td class="num">${c.status === 'open' ? `<button class="btn sm" data-a="draw" data-id="${c.id}">Draw winner</button> <button class="btn ghost sm" data-a="close-contest" data-id="${c.id}">Close</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No contest yet.</td></tr>'}
@@ -172,8 +179,10 @@
       return `<p class="eyebrow">Messages</p><h1 class="title">Send an <em>email</em></h1>
         <div class="grid2"><form class="card stack" data-form="email">
           ${audienceFields('email')}
-          <label class="f">Subject<input name="subject" id="em-subject" maxlength="150" required placeholder="The autumn edit is here"></label>
-          <label class="f">Message<textarea name="body" id="em-body" maxlength="10000" required placeholder="Bonjour {first},&#10;&#10;…"></textarea><span class="hint">{first} is replaced by each customer's first name. Leave a blank line between paragraphs.</span></label>
+          <label class="f">Subject (French)<input name="subject" id="em-subject" maxlength="150" required placeholder="La sélection d'automne est arrivée"></label>
+          <label class="f">Message (French)<textarea name="body" id="em-body" maxlength="10000" required placeholder="Bonjour {first},&#10;&#10;…"></textarea><span class="hint">{first} is replaced by each customer's first name. Leave a blank line between paragraphs.</span></label>
+          <label class="f">Subject (English, optional)<input name="subjectEn" id="em-subject-en" maxlength="150" placeholder="The autumn edit is here"></label>
+          <label class="f">Message (English, optional)<textarea name="bodyEn" id="em-body-en" maxlength="10000" placeholder="Hello {first},&#10;&#10;…"></textarea><span class="hint">Customers who use the app in English get this version. Without it, everyone gets the French one.</span></label>
           ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
           <button class="btn">Send email</button>
           ${!ch.email ? '<p class="hint">Email delivery is not configured: messages will be saved in Sent messages only.</p>' : ''}
@@ -184,14 +193,17 @@
       return `<p class="eyebrow">Messages</p><h1 class="title">Send a <em>push notification</em></h1>
         <div class="grid2"><form class="card stack" data-form="push">
           ${audienceFields('push', true)}
-          <label class="f">Title<input name="title" id="pu-title" maxlength="80" required placeholder="Your autumn vouchers are live"></label>
-          <label class="f">Message<input name="body" id="pu-body" maxlength="240" required placeholder="Trade your Skin Miles for −50% on a Soin Signature."></label>
-          <label class="f">Opens<select name="url" id="pu-url"><option value="/">Home</option><option value="/#book">Booking</option></select></label>
+          <label class="f">Title (French)<input name="title" id="pu-title" maxlength="80" required placeholder="Vos bons d'automne sont là"></label>
+          <label class="f">Message (French)<input name="body" id="pu-body" maxlength="240" required placeholder="Échangez vos Skin Miles contre −50 % sur un Soin Signature."></label>
+          <label class="f">Title (English, optional)<input name="titleEn" id="pu-title-en" maxlength="80" placeholder="Your autumn vouchers are live"></label>
+          <label class="f">Message (English, optional)<input name="bodyEn" id="pu-body-en" maxlength="240" placeholder="Trade your Skin Miles for −50% on a Soin Signature."></label>
+          <label class="f">Opens<select name="url" id="pu-url"><option value="/">Home</option><option value="/#book">Booking</option><option value="/#contests">Contests</option><option value="/#collabs">Collabs</option><option value="/#scan">Skin scan</option></select></label>
           ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
           <button class="btn">Send notification</button>
           <p class="hint">Only customers who turned on notifications in their profile receive them (<span id="push-subs">${nf((state.data.stats || {}).pushSubscribers)}</span> so far).</p>
         </form>
-        <div class="card"><h3>Preview</h3><div class="preview-push" style="margin-top:12px"><span class="ic">s</span><div><b id="pv-title">Your autumn vouchers are live</b><div class="muted" id="pv-body">Trade your Skin Miles for −50% on a Soin Signature.</div></div></div></div></div>`;
+        <div class="card"><h3>Preview</h3><div class="preview-push" style="margin-top:12px"><span class="ic">s</span><div><b id="pv-title">Vos bons d'automne sont là</b><div class="muted" id="pv-body">Échangez vos Skin Miles contre −50 % sur un Soin Signature.</div></div></div>
+          <p class="hint" style="margin-top:10px">Customers who use the app in English get the English version when you write one.</p></div></div>`;
     },
     outbox() {
       const list = state.data.outbox;
@@ -201,6 +213,31 @@
         ${list.map((m) => `<tr><td>${when(m.created_at)}</td><td>${esc(m.channel.toUpperCase())}</td><td>${esc(m.to_addr)}</td>
           <td>${m.subject ? `<b>${esc(m.subject)}</b><br>` : ''}<span class="muted">${esc(m.body.slice(0, 160))}${m.body.length > 160 ? '…' : ''}</span></td>
           <td><span class="pill ${m.status === 'sent' ? 'ok' : m.status === 'failed' ? 'bad' : 'grey'}">${esc(m.status)}</span>${m.error ? `<div class="muted">${esc(m.error.slice(0, 80))}</div>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>`}`;
+    },
+    collabs() {
+      const list = state.data.collabs;
+      return `<div class="row between"><div><p class="eyebrow">Partnerships</p><h1 class="title">Collabs &amp; <em>events</em></h1></div><button class="btn" data-a="collab-new">Add a collab</button></div>
+        <p class="muted" style="margin-bottom:14px">Shown on the app's home screen, for example Seasonly x Blissim. Write the French and English copy: each customer sees their own language. Events can take registrations.</p>
+        ${!list ? '<p class="muted">Loading…</p>' : !list.length ? '<p class="muted">No collab yet.</p>' : `<div class="table-wrap"><table><thead><tr><th></th><th>Collab</th><th>Type</th><th>Dates</th><th class="num">Registered</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map((c) => `<tr><td><div class="thumb" style="background:${esc(c.color)};${c.image ? `background-image:url('${esc(c.image)}')` : ''}"></div></td>
+          <td><b>Seasonly x ${esc(c.partner)}</b><div class="muted">${esc(c.fr.title)} · ${esc(c.en.title)}</div></td>
+          <td>${c.kind === 'event' ? 'Event' : 'Brand'}</td><td>${c.eventAt ? when(c.eventAt) : '—'}${c.endsAt ? `<div class="muted">until ${when(c.endsAt)}</div>` : ''}</td>
+          <td class="num">${c.rsvp ? `${nf(c.registrations)}${c.capacity ? ` / ${nf(c.capacity)}` : ''}` : '—'}</td>
+          <td>${c.active ? '<span class="pill ok">Live</span>' : '<span class="pill grey">Hidden</span>'}</td>
+          <td class="num"><button class="btn ghost sm" data-a="collab-edit" data-id="${c.id}">Edit</button></td></tr>
+          ${c.attendees && c.attendees.length ? `<tr><td></td><td colspan="6" class="muted">Registered: ${c.attendees.map((a) => esc(`${a.first} ${a.last || ''} (${a.email || a.phone || ''})`.trim())).join(' · ')}</td></tr>` : ''}`).join('')}
+        </tbody></table></div>`}`;
+    },
+    rituals() {
+      const list = state.data.rituals;
+      return `<p class="eyebrow">Content</p><h1 class="title">Ritual <em>videos</em></h1>
+        <p class="muted" style="margin-bottom:14px">Each ritual plays as an animated guide with a voice reading the steps. Upload your own video (MP4, MOV or WebM, up to 150 MB) to replace it. Customers earn their miles when the video reaches its end.</p>
+        ${!list ? '<p class="muted">Loading…</p>' : `<div class="table-wrap"><table><thead><tr><th>Ritual</th><th class="num">Steps</th><th>Now playing</th><th></th></tr></thead><tbody>
+        ${list.map((r) => `<tr><td><b>${esc(r.name)}</b></td><td class="num">${r.steps}</td>
+          <td>${r.video ? `<video src="${esc(r.video)}" controls preload="metadata" style="max-width:220px;border-radius:10px"></video>` : `<span class="muted">Animated guide · ${Math.round(r.secs / 6) / 10} min</span>`}</td>
+          <td class="num"><label class="btn ghost sm" for="rv-${esc(r.id)}">${r.video ? 'Replace' : 'Upload video'}</label><input type="file" id="rv-${esc(r.id)}" data-ritual="${esc(r.id)}" accept="video/mp4,video/quicktime,video/webm" hidden>
+          ${r.video ? ` <button class="btn danger sm" data-a="ritual-video-remove" data-id="${esc(r.id)}">Remove</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div>`}`;
     },
     settings() {
@@ -230,7 +267,7 @@
   }
 
   function productModal(p) {
-    const n = p || { name: '', sub: '', desc: '', price: '', size: '', cat: 'Sérums', tags: [], badge: '', active: true, stats: [] };
+    const n = p || { name: '', sub: '', desc: '', subFr: '', descFr: '', price: '', size: '', cat: 'Sérums', tags: [], badge: '', active: true, stats: [] };
     const stats = [0, 1, 2].map((i) => n.stats[i] || ['', '']);
     return `<div class="modal" data-a="modal-bg"><div role="dialog" aria-modal="true" aria-label="Product">
       <form class="stack" data-form="product" data-id="${esc(p ? p.id : '')}">
@@ -238,8 +275,10 @@
         <div class="row" style="align-items:flex-end"><div class="img-preview" style="${n.image ? `background-image:url('${esc(n.image)}')` : ''}"></div>
           ${p ? '<div><label class="btn ghost sm" for="pimg">Upload photo</label><input type="file" id="pimg" accept="image/jpeg,image/png" hidden><p class="hint" style="margin-top:6px">Square JPEG or PNG on a plain background works best.</p></div>' : '<p class="hint">Save the product first, then add its photo.</p>'}</div>
         <label class="f">Name<input name="name" id="p-name" required maxlength="80" value="${esc(n.name)}"></label>
-        <label class="f">Short line<input name="sub" id="p-sub" maxlength="120" value="${esc(n.sub)}" placeholder="Firming lifting serum"></label>
-        <label class="f">Description<textarea name="desc" id="p-desc" maxlength="2000">${esc(n.desc)}</textarea></label>
+        <div class="grid2 tight"><label class="f">Short line (French)<input name="subFr" id="p-sub-fr" maxlength="120" value="${esc(n.subFr || '')}" placeholder="Sérum liftant raffermissant"></label>
+          <label class="f">Short line (English)<input name="sub" id="p-sub" maxlength="120" value="${esc(n.sub)}" placeholder="Firming lifting serum"></label></div>
+        <div class="grid2 tight"><label class="f">Description (French)<textarea name="descFr" id="p-desc-fr" maxlength="2000">${esc(n.descFr || '')}</textarea></label>
+          <label class="f">Description (English)<textarea name="desc" id="p-desc" maxlength="2000">${esc(n.desc)}</textarea></label></div>
         <div class="f3"><label class="f">Price (€)<input name="price" id="p-price" type="number" step="0.01" min="0.01" required value="${esc(n.price)}"></label>
           <label class="f">Was (€)<input name="compareAt" id="p-compare" type="number" step="0.01" min="0" value="${esc(n.compareAt || '')}"></label>
           <label class="f">Size<input name="size" id="p-size" maxlength="30" value="${esc(n.size)}" placeholder="30 ml"></label></div>
@@ -251,6 +290,35 @@
         <label class="check"><input type="checkbox" name="active" id="p-active" ${n.active ? 'checked' : ''}> Visible in the app</label>
         ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
         <div class="row between"><button class="btn">${p ? 'Save changes' : 'Create product'}</button>${p ? '<button type="button" class="btn danger sm" data-a="product-delete">Delete</button>' : ''}</div>
+      </form></div></div>`;
+  }
+  function collabModal(c) {
+    const n = c || { partner: '', kind: 'brand', fr: {}, en: {}, color: '#C4806C', rsvp: false, capacity: 0, active: true, link: '', code: '', place: '' };
+    const lang = (l, label) => `<fieldset class="stack" style="border:1px solid #ECE3DC;border-radius:14px;padding:12px"><legend class="hint">${label}</legend>
+      <label class="f">Title<input name="${l}-title" id="co-${l}-title" maxlength="90" value="${esc(n[l].title || '')}" placeholder="Seasonly x Blissim"></label>
+      <label class="f">Subtitle<input name="${l}-subtitle" id="co-${l}-subtitle" maxlength="140" value="${esc(n[l].subtitle || '')}"></label>
+      <label class="f">Text<textarea name="${l}-body" id="co-${l}-body" maxlength="1500">${esc(n[l].body || '')}</textarea></label>
+      <div class="f3"><label class="f">Button<input name="${l}-cta" id="co-${l}-cta" maxlength="30" value="${esc(n[l].cta || '')}"></label>
+        <label class="f">When (events)<input name="${l}-when" id="co-${l}-when" maxlength="80" value="${esc(n[l].when || '')}"></label>
+        <label class="f">Offer line<input name="${l}-offer" id="co-${l}-offer" maxlength="140" value="${esc(n[l].offer || '')}"></label></div></fieldset>`;
+    return `<div class="modal" data-a="modal-bg"><div role="dialog" aria-modal="true" aria-label="Collab">
+      <form class="stack" data-form="collab" data-id="${c ? c.id : ''}">
+        <div class="row between"><h2 class="title" style="margin:0">${c ? 'Edit collab' : 'New collab'}</h2><button type="button" class="btn ghost sm" data-a="modal-close">Close</button></div>
+        ${c ? `<div class="row" style="align-items:flex-end"><div class="img-preview" style="${n.image ? `background-image:url('${esc(n.image)}')` : `background:${esc(n.color)}`}"></div><div><label class="btn ghost sm" for="coimg">Upload photo</label><input type="file" id="coimg" accept="image/jpeg,image/png" hidden><p class="hint" style="margin-top:6px">Landscape photo, JPEG or PNG.</p></div></div>` : '<p class="hint">Save the collab first, then add its photo.</p>'}
+        <div class="f3"><label class="f">Partner<input name="partner" id="co-partner" required maxlength="60" value="${esc(n.partner)}" placeholder="Blissim"></label>
+          <label class="f">Type<select name="kind" id="co-kind"><option value="brand" ${n.kind === 'brand' ? 'selected' : ''}>Brand collab</option><option value="event" ${n.kind === 'event' ? 'selected' : ''}>Event</option></select></label>
+          <label class="f">Colour<input name="color" id="co-color" type="color" value="${esc(n.color)}"></label></div>
+        ${lang('fr', 'French')}${lang('en', 'English')}
+        <div class="f3"><label class="f">Link (https)<input name="link" id="co-link" maxlength="300" value="${esc(n.link)}" placeholder="https://www.blissim.fr"></label>
+          <label class="f">Promo code<input name="code" id="co-code" maxlength="30" value="${esc(n.code)}"></label>
+          <label class="f">Place (events)<input name="place" id="co-place" maxlength="140" value="${esc(n.place)}"></label></div>
+        <div class="f3"><label class="f">Event date<input type="datetime-local" name="eventAt" id="co-event" value="${localInput(n.eventAt)}"></label>
+          <label class="f">Hide after<input type="datetime-local" name="endsAt" id="co-ends" value="${localInput(n.endsAt)}"></label>
+          <label class="f">Places (0 = no limit)<input type="number" name="capacity" id="co-cap" min="0" value="${n.capacity || 0}"></label></div>
+        <label class="check"><input type="checkbox" name="rsvp" id="co-rsvp" ${n.rsvp ? 'checked' : ''}> Customers can register</label>
+        <label class="check"><input type="checkbox" name="active" id="co-active" ${n.active ? 'checked' : ''}> Visible in the app</label>
+        ${state.error ? `<p class="error">${esc(state.error)}</p>` : ''}
+        <div class="row between"><button class="btn">${c ? 'Save changes' : 'Create collab'}</button>${c ? '<button type="button" class="btn danger sm" data-a="collab-delete">Delete</button>' : ''}</div>
       </form></div></div>`;
   }
   function milesModal(id, name) {
@@ -290,7 +358,7 @@
     const map = { dashboard: [['stats', '/stats']], products: [['products', '/products']], customers: [['users', `/users?q=${encodeURIComponent(state.q)}`]],
       contests: [['contestData', '/contests']], gifts: [['gifts', '/gifts'], ['contestData', '/contests']],
       bookings: [['bookings', '/bookings']], orders: [['orders', '/orders']], inbox: [['messages', `/messages${state.inboxKind ? `?kind=${state.inboxKind}` : ''}`]], referrals: [['referrals', '/referrals'], ['settings', '/settings']],
-      outbox: [['outbox', '/outbox']], settings: [['settings', '/settings']], push: [['stats', '/stats']], email: [] };
+      outbox: [['outbox', '/outbox']], settings: [['settings', '/settings']], push: [['stats', '/stats']], email: [], collabs: [['collabs', '/collabs']], rituals: [['rituals', '/rituals']] };
     const jobs = map[view] || [];
     if (!jobs.length) return;
     try {
@@ -333,6 +401,14 @@
     },
     'inbox-kind'(el) { state.inboxKind = el.dataset.id; state.data.messages = null; render(); load('inbox'); },
     async 'msg-status'(el) { try { await api('POST', `/messages/${el.dataset.id}/${el.dataset.status}`); load('inbox'); } catch (e) { toast(e.message); } },
+    'collab-new'() { state.error = ''; state.editingCollab = null; state.modal = collabModal(null); render(); },
+    'collab-edit'(el) { state.error = ''; state.editingCollab = state.data.collabs.find((c) => String(c.id) === el.dataset.id); state.modal = collabModal(state.editingCollab); render(); },
+    async 'collab-delete'() {
+      if (!state.confirmDelete) { state.confirmDelete = true; toast('Press Delete again to remove this collab for good.'); return; }
+      state.confirmDelete = false;
+      try { await api('DELETE', `/collabs/${state.editingCollab.id}`); state.modal = null; toast('Collab deleted'); load('collabs'); } catch (e) { toast(e.message); }
+    },
+    async 'ritual-video-remove'(el) { try { await api('DELETE', `/rituals/${el.dataset.id}/video`); toast('Video removed · the animated guide is back'); load('rituals'); } catch (e) { toast(e.message); } },
     async 'hero-remove'() { try { await api('DELETE', '/settings/hero'); toast('Photo removed'); load('settings'); } catch (e) { toast(e.message); } },
   };
   const FORMS = {
@@ -344,7 +420,7 @@
     async search(f) { state.q = f.q.value; await load('customers'); },
     async product(f) {
       const stats = [0, 1, 2].map((i) => [f[`sv${i}`].value, f[`sl${i}`].value]).filter((s) => s[0]);
-      const body = { name: f.name.value, sub: f.sub.value, desc: f.desc.value, price: f.price.value, compareAt: f.compareAt.value, size: f.size.value,
+      const body = { name: f.name.value, sub: f.sub.value, desc: f.desc.value, subFr: f.subFr.value, descFr: f.descFr.value, price: f.price.value, compareAt: f.compareAt.value, size: f.size.value,
         cat: f.cat.value, badge: f.badge.value, tags: f.tags.value, stats, active: f.active.checked };
       const id = f.dataset.id;
       const r = id ? await api('PUT', `/products/${encodeURIComponent(id)}`, body) : await api('POST', '/products', body);
@@ -357,17 +433,17 @@
       state.modal = null; toast('Miles updated'); load('customers');
     },
     async email(f) {
-      const r = await api('POST', '/email', { audience: f.audience.value, to: f.to.value, subject: f.subject.value, body: f.body.value });
+      const r = await api('POST', '/email', { audience: f.audience.value, to: f.to.value, subject: f.subject.value, body: f.body.value, subjectEn: f.subjectEn.value, bodyEn: f.bodyEn.value });
       toast(`${r.sent} of ${r.recipients} email(s) ${r.delivered ? 'sent' : 'saved in Sent messages'}`);
       f.reset();
     },
     async push(f) {
-      const r = await api('POST', '/push', { audience: f.audience.value, to: f.to.value, title: f.title.value, body: f.body.value, url: f.url.value });
+      const r = await api('POST', '/push', { audience: f.audience.value, to: f.to.value, title: f.title.value, body: f.body.value, titleEn: f.titleEn.value, bodyEn: f.bodyEn.value, url: f.url.value });
       toast(`Delivered to ${r.sent} of ${r.subscriptions} device(s)`);
       f.reset();
     },
     async contest(f) {
-      await api('POST', '/contests', { period: f.period.value, prizeKind: f.prizeKind.value, prizeRef: f.prizeRef.value, winners: f.winners.value, title: f.title.value, description: f.description.value, endsAt: f.endsAt.value ? `${f.endsAt.value}T23:59:59` : '', announce: f.announce.checked });
+      await api('POST', '/contests', { period: f.period.value, prizeKind: f.prizeKind.value, prizeRef: f.prizeRef.value, winners: f.winners.value, title: f.title.value, titleEn: f.titleEn.value, description: f.description.value, descriptionEn: f.descriptionEn.value, endsAt: f.endsAt.value ? `${f.endsAt.value}T23:59:59` : '', announce: f.announce.checked });
       toast('Contest launched'); f.reset(); load('contests');
     },
     async gift(f) {
@@ -377,6 +453,16 @@
     async reply(f) {
       await api('POST', `/messages/${f.dataset.id}/reply`, { body: f.body.value });
       toast('Reply sent'); load('inbox');
+    },
+    async collab(f) {
+      const lang = (l) => Object.fromEntries(['title', 'subtitle', 'body', 'cta', 'when', 'offer'].map((k) => [k, f[`${l}-${k}`].value]));
+      const body = { partner: f.partner.value, kind: f.kind.value, color: f.color.value, fr: lang('fr'), en: lang('en'), link: f.link.value, code: f.code.value, place: f.place.value,
+        eventAt: f.eventAt.value || null, endsAt: f.endsAt.value || null, capacity: f.capacity.value, rsvp: f.rsvp.checked, active: f.active.checked };
+      const id = f.dataset.id;
+      const r = id ? await api('PUT', `/collabs/${id}`, body) : await api('POST', '/collabs', body);
+      toast(id ? 'Collab saved' : 'Collab created. You can now add its photo.');
+      await load('collabs');
+      if (!id) { state.editingCollab = r.collab; state.modal = collabModal(r.collab); render(); } else { state.modal = null; render(); }
     },
     async referral(f) {
       await api('PUT', '/settings', { referral: { welcome: f.welcome.value, perFriend: f.perFriend.value, cap: f.cap.value } });
@@ -397,8 +483,9 @@
     catch (err) {
       state.error = err.message;
       if (name === 'product') state.modal = productModal(state.editing);
+      else if (name === 'collab') state.modal = collabModal(state.editingCollab);
       else if (name === 'miles') state.modal = milesModal(f.dataset.id, '');
-      if (['login', 'product', 'miles', 'email', 'push', 'contest', 'gift'].includes(name)) { const keep = new FormData(f); render(); restore(keep); } else toast(err.message);
+      if (['login', 'product', 'collab', 'miles', 'email', 'push', 'contest', 'gift'].includes(name)) { const keep = new FormData(f); render(); restore(keep); } else toast(err.message);
     }
     if (btn && btn.isConnected) btn.disabled = false;
   });
@@ -412,6 +499,24 @@
       sel.innerHTML = (t.value === 'product' ? d.products : d.services).map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
     }
     if (t.name === 'audience') { const wrap = document.getElementById(t.id.replace('-aud', '-to-wrap')); if (wrap) wrap.hidden = t.value !== 'one'; }
+    if (t.dataset.ritual && t.files[0]) {
+      const file = t.files[0];
+      if (file.size > 150 * 1024 * 1024) return toast('Videos must be 150 MB or smaller.');
+      // Read the video's length so completion checks the right watch time.
+      const secs = await new Promise((ok) => { const v = document.createElement('video'); v.preload = 'metadata'; v.onloadedmetadata = () => { ok(v.duration); URL.revokeObjectURL(v.src); }; v.onerror = () => ok(0); v.src = URL.createObjectURL(file); });
+      toast('Uploading the video…');
+      try {
+        const res = await fetch(`/api/admin/rituals/${t.dataset.ritual}/video`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Seasonly': '1', 'Content-Type': file.type || 'video/mp4', 'X-Duration': String(Math.round(secs || 0)) }, body: file });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(d.error || 'Upload failed.');
+        toast('Video uploaded · customers now see it'); load('rituals');
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    if (t.id === 'coimg' && t.files[0]) {
+      try { const r = await api('POST', `/collabs/${state.editingCollab.id}/image`, null, t.files[0]); state.editingCollab = r.collab; state.modal = collabModal(r.collab); toast('Photo uploaded'); await load('collabs'); } catch (err) { toast(err.message); }
+      return;
+    }
     if ((t.id === 'pimg' || t.id === 'hero-file') && t.files[0]) {
       const file = t.files[0];
       if (file.size > 5 * 1024 * 1024) return toast('Photos must be 5 MB or smaller.');
@@ -424,7 +529,7 @@
     }
   });
   document.addEventListener('input', (e) => {
-    if (e.target.id === 'pu-title') document.getElementById('pv-title').textContent = e.target.value || 'Your autumn vouchers are live';
+    if (e.target.id === 'pu-title') document.getElementById('pv-title').textContent = e.target.value || "Vos bons d'automne sont là";
     if (e.target.id === 'pu-body') document.getElementById('pv-body').textContent = e.target.value || '';
   });
 

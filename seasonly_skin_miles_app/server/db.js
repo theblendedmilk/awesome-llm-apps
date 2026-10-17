@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
   state TEXT NOT NULL,
   avatar_id TEXT,
   address TEXT,
+  gender TEXT NOT NULL DEFAULT 'undisclosed',
+  lang TEXT NOT NULL DEFAULT 'fr',
   created_at INTEGER NOT NULL,
   last_login INTEGER
 );
@@ -99,6 +101,8 @@ CREATE TABLE IF NOT EXISTS contests (
   ends_at INTEGER NOT NULL,
   status TEXT NOT NULL,
   winner_ids TEXT,
+  title_en TEXT NOT NULL DEFAULT '',
+  description_en TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS contest_entries (
@@ -121,6 +125,22 @@ CREATE TABLE IF NOT EXISTS gifts (
   created_at INTEGER NOT NULL,
   shipped_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS collabs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  partner TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  image_id TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collab_regs (
+  collab_id INTEGER NOT NULL REFERENCES collabs(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (collab_id, user_id)
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -141,6 +161,11 @@ function openDb(file) {
   // Columns added after the first release.
   const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!cols.includes('address')) db.exec('ALTER TABLE users ADD COLUMN address TEXT');
+  if (!cols.includes('gender')) db.exec("ALTER TABLE users ADD COLUMN gender TEXT NOT NULL DEFAULT 'undisclosed'");
+  if (!cols.includes('lang')) db.exec("ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'fr'");
+  const ccols = db.prepare('PRAGMA table_info(contests)').all().map((c) => c.name);
+  if (!ccols.includes('title_en')) db.exec("ALTER TABLE contests ADD COLUMN title_en TEXT NOT NULL DEFAULT ''");
+  if (!ccols.includes('description_en')) db.exec("ALTER TABLE contests ADD COLUMN description_en TEXT NOT NULL DEFAULT ''");
 
   const q = (sql) => db.prepare(sql);
   db.tx = (fn) => {

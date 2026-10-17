@@ -121,11 +121,56 @@ The Face Glow Bar treatments (Gym, Glow, Winter, 15 min, €25) and the three Pa
   - If the customer changes address before shipping, the gift follows the new address.
 - **Address at sign-up:** street, postcode, city and country (France, Belgium, Switzerland, Luxembourg, Monaco) are required. They can be edited in Profile → Shipping address.
 
+## French and English
+
+- The whole app is in **French or English**. It starts in the phone's language; customers can switch with the FR / EN buttons on the welcome and sign-up screens or in Profile → Settings → Language. The choice is remembered.
+- Nothing is mixed: interface, catalogue copy, rituals, quiz, vouchers, miles history and error messages all have both versions (`public/i18n.js`).
+- Emails, SMS and push notifications go out in the language the customer last used in the app (`server/i18n.js`).
+- Content written in the admin panel has a French and an English field: products, contests, collabs, emails and push notifications.
+
+## Gender
+
+Sign-up asks how the customer identifies: woman, man, other, or prefer not to say. It can be changed in Profile → Edit and is shown in Admin → Customers. The French texts agree with it (for example *Ambassadrice* / *Ambassadeur*).
+
+## Contests that stand out
+
+- An open contest shows as a banner on Home with an animated prize box, a countdown and an **Enter** button.
+- The Rewards tab carries a pulsing gift badge until the customer enters.
+- In Rewards, Contests come right after the miles balance.
+- Entering plays a short confetti burst. Animations stop when the phone asks for reduced motion.
+
+## Ritual videos with sound
+
+- Each ritual plays as a short video. An animated face shows each movement (circles, presses, gua sha strokes, taps, drainage), with a voice reading the steps in the app's language, a soft ambient sound and a chime between steps. Sound can be muted.
+- The Skin Miles are credited **at the end of the video**. The server checks that the video was started and that at least 80% of its length went by (`RITUAL_WATCH_SHARE`).
+- **Admin → Ritual videos**: upload your own filmed video (MP4, MOV or WebM, up to 150 MB) to replace the animated guide. Its length is read on upload, so the same check applies.
+
+## Skin scan
+
+- Home → *How is my skin today?* (or Rewards → Skin scan). Take a selfie with the camera, or choose a photo.
+- The result is light and playful: a glow score, six scores (hydration, radiance, evenness, smoothness, calm, firmness), the skin type, three tips, a ritual video and products to try. Each score shows its change since the last scan. +15 Skin Miles once a day.
+- It is clearly labelled *for fun, not a medical diagnosis*. The photo is never stored.
+- **On the server**, when `ANTHROPIC_API_KEY` and `SKIN_SCAN_MODEL` are set, the photo is read by Claude (`server/skin.js`), which writes the reading in the customer's language. Requests use the server-side fallback option, so a declined request is retried on another model.
+- **Without them** (including the Netlify demo), the photo is analysed on the phone from its light, colour and detail.
+
+## Booking for several people
+
+Step 2 of booking asks how many people are coming (up to 5), with a treatment for each and an optional first name for guests. Everyone is booked at the same time. Vouchers and referral discounts apply to the customer's own treatment, and guests pay the list price. Once paid, the customer earns 150 miles plus 50 per guest. The confirmation email lists everyone.
+
+## Collabs and events
+
+- Home shows a **Collabs & events** row, starting with **Seasonly x Blissim** and a *Glow Night* event at La Canopée. These two are sample copy: edit or replace them before launch.
+- Each collab has a partner, colour or photo, French and English text, and can have a link, a promo code, a place and a date.
+- Events can take registrations, with an optional number of places. Customers get a confirmation email.
+- **Admin → Collabs**: create, edit, hide or delete collabs, and see who registered.
+
 ## Admin panel (`/admin`)
 
 | Section | What it does |
 |---|---|
-| Contests | Launch weekly, monthly or yearly contests and draw winners |
+| Contests | Launch weekly, monthly or yearly contests (French and English titles) and draw winners |
+| Collabs | Brand collaborations and events, with registrations |
+| Ritual videos | Upload filmed videos to replace the animated guides |
 | Gifts | Give treatments or products; track shipping |
 | Inbox | Support messages, feedback and feature ideas; reply by email, mark resolved |
 | Dashboard | Customers, bookings, orders, revenue, miles, referrals, push subscribers, and which delivery channels are connected |
@@ -140,7 +185,7 @@ The Face Glow Bar treatments (Gym, Glow, Winter, 15 min, €25) and the three Pa
 ## Tests
 
 ```bash
-npm test                         # 13 API tests (auth, codes, rewards, referral, photo security, admin)
+npm test                         # 30 API tests (auth, codes, rewards, referral, languages, group booking, skin scan, collabs, videos, admin)
 npm i -D playwright && node test/e2e.js --runs 3   # full browser journey, 3 times in a row
 ```
 
